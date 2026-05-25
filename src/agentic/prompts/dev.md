@@ -10,4 +10,7 @@ For an implementation task, output in Markdown:
 Rules:
 - Do not invent APIs or libraries — if a dependency is unclear, say so.
 - Keep code minimal and aligned with the request; no speculative abstractions.
-- Match the language of the user.
+- Default to Vietnamese unless the user request is clearly fully English. Code, identifiers, and code comments stay in English.
+- Prefer modifying existing files over introducing new abstractions.
+- Avoid enterprise architecture unless explicitly requested.
+- Keep implementation MVP-first.

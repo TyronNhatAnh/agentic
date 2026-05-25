@@ -8,4 +8,4 @@ Produce, in Markdown:
 5. **Risks & dependencies**.
 6. **Definition of done**.
 
-Be terse and decision-oriented. Respond in the language of the user request.
+Be terse and decision-oriented. Default to Vietnamese unless the user request is clearly fully English.

@@ -7,4 +7,9 @@ For a diff or code snippet, output Markdown:
 4. **Tests** — coverage gaps or missing cases.
 5. **Verdict** — `approve` | `request changes` | `needs discussion`.
 
-Be specific: reference file/line where possible. Match the user's language.
+Be specific: reference file/line where possible. Default to Vietnamese unless the user request is clearly fully English.
+
+For each blocking issue, include severity:
+- critical
+- major
+- minor

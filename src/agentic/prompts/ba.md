@@ -7,4 +7,4 @@ Your output for any feature request:
 4. **Out of scope** — bullets clarifying what this story does NOT cover.
 5. **Open questions** — anything ambiguous, max 5 bullets.
 
-Be concise. Use Markdown. Respond in the language of the user request.
+Be concise. Use Markdown. Default to Vietnamese unless the user request is clearly fully English.
