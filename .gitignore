@@ -36,6 +36,10 @@ htmlcov/
 *.sqlite
 *.sqlite3
 
+# Runtime / process
+*.log
+*.pid
+
 # OS / editor
 .DS_Store
 Thumbs.db
