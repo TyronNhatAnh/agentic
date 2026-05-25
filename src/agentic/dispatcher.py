@@ -2,8 +2,10 @@ import asyncio
 import logging
 import re
 import time
+from pathlib import Path
 
 from .agents import REGISTRY
+from .agents.dev import run_dev as _run_dev_direct
 from .agents.base import run_claude
 from .brain import Action, BrainDecision, decide
 from .config import settings
@@ -17,6 +19,7 @@ from .store import (
     get_thread,
     log_run,
     recent_messages,
+    resolve_service_by_github_repo,
     save_pending_confirmation,
     touch_thread,
     update_thread_fields,
@@ -413,6 +416,35 @@ async def _run_pending(
     return display
 
 
+def _dev_cwd_from_context(
+    thread_row: dict | None,
+    text: str = "",
+    prior_messages: list[dict] | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve (repo_slug, local_path) for the dev agent.
+
+    Tries, in order:
+      1. thread.repo field (already persisted)
+      2. Parsing from current text + message history
+    Returns (None, None) if no local mapping found.
+    """
+    candidates: list[str] = []
+    if thread_row:
+        slug = (thread_row.get("repo") or "").strip()
+        if slug:
+            candidates.append(slug)
+    inferred = _repo_from_text_or_history(text, prior_messages or [])
+    if inferred and inferred not in candidates:
+        candidates.append(inferred)
+    for slug in candidates:
+        svc = resolve_service_by_github_repo(slug)
+        if svc:
+            path = svc.get("repo_path") or ""
+            if path and Path(path).is_dir():
+                return slug, path
+    return None, None
+
+
 async def handle_message(
     text: str,
     *,
@@ -453,7 +485,10 @@ async def handle_message(
         if thread_ts:
             add_message(thread_ts, "assistant", display)
             if status == "ok":
-                update_thread_fields(thread_ts, last_agent="tool:git.check_repo")
+                fields: dict = {"last_agent": "tool:git.check_repo"}
+                if repo:
+                    fields["repo"] = repo
+                update_thread_fields(thread_ts, **fields)
         return display
 
     # Resume / cancel a pending confirmation before invoking brain.
@@ -541,7 +576,22 @@ async def handle_message(
             prior_output, settings.max_context_chars, label="context"
         )
         try:
-            output = await runner(step.task, context=context_for_step)
+            if step.agent == "dev":
+                dev_slug, dev_cwd = _dev_cwd_from_context(
+                    thread_row if thread_ts else None,
+                    text=text,
+                    prior_messages=prior_messages,
+                )
+                if dev_slug and thread_ts and not (thread_row or {}).get("repo"):
+                    update_thread_fields(thread_ts, repo=dev_slug)
+                output = await _run_dev_direct(
+                    step.task,
+                    context=context_for_step,
+                    cwd=dev_cwd,
+                    apply_changes=bool(dev_cwd),
+                )
+            else:
+                output = await runner(step.task, context=context_for_step)
             status = "ok"
         except Exception as e:
             log.exception("agent %s failed", step.agent)

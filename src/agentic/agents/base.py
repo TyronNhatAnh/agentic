@@ -45,6 +45,12 @@ async def run_claude(
     ]
     if permission_mode:
         args.extend(["--permission-mode", permission_mode])
+    # When using a non-default cwd (i.e. an actual repo), allow tool access to
+    # the workspace root so claude can reach any service repo under it.
+    # Falls back to the cwd itself if workspace_dir is not configured.
+    if cwd and cwd != settings.claude_runtime_dir:
+        allowed = settings.workspace_dir or cwd
+        args.extend(["--add-dir", allowed])
     log.debug("running claude: %s chars sys / %s chars user", len(system_prompt), len(user_prompt))
     proc = await asyncio.create_subprocess_exec(
         *args,
