@@ -15,14 +15,12 @@ class Settings(BaseSettings):
 
     github_token: str = Field(default="", alias="GITHUB_TOKEN")
     github_default_repo: str = Field(default="", alias="GITHUB_DEFAULT_REPO")
+    github_username: str = Field(default="", alias="GITHUB_USERNAME")
 
     jira_base_url: str = Field(default="", alias="JIRA_BASE_URL")
     jira_email: str = Field(default="", alias="JIRA_EMAIL")
     jira_api_token: str = Field(default="", alias="JIRA_API_TOKEN")
     jira_default_project: str = Field(default="", alias="JIRA_DEFAULT_PROJECT")
-
-    linear_api_key: str = Field(default="", alias="LINEAR_API_KEY")
-    linear_default_team_id: str = Field(default="", alias="LINEAR_DEFAULT_TEAM_ID")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 

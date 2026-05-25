@@ -5,12 +5,12 @@ from ..config import settings
 API = "https://api.github.com"
 
 
-def _headers() -> dict[str, str]:
+def _headers(accept: str = "application/vnd.github+json") -> dict[str, str]:
     if not settings.github_token:
         raise RuntimeError("GITHUB_TOKEN not configured")
     return {
         "Authorization": f"Bearer {settings.github_token}",
-        "Accept": "application/vnd.github+json",
+        "Accept": accept,
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
@@ -22,7 +22,15 @@ def _repo(repo: str | None) -> str:
     return repo
 
 
-async def create_issue(title: str, body: str, repo: str | None = None) -> dict:
+def _me() -> str:
+    if not settings.github_username:
+        raise ValueError("GITHUB_USERNAME not configured (needed for 'my' queries)")
+    return settings.github_username
+
+
+# ---------- write tools ----------
+
+async def create_issue(title: str, body: str, repo: str | None = None) -> str:
     repo = _repo(repo)
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
@@ -31,11 +39,11 @@ async def create_issue(title: str, body: str, repo: str | None = None) -> dict:
             json={"title": title, "body": body},
         )
         r.raise_for_status()
-        data = r.json()
-        return {"number": data["number"], "url": data["html_url"]}
+        d = r.json()
+        return f"✅ Tạo issue #{d['number']} trong `{repo}`: <{d['html_url']}|{d['title']}>"
 
 
-async def comment_pr(pr: int, body: str, repo: str | None = None) -> dict:
+async def comment_pr(pr: int, body: str, repo: str | None = None) -> str:
     repo = _repo(repo)
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
@@ -44,25 +52,157 @@ async def comment_pr(pr: int, body: str, repo: str | None = None) -> dict:
             json={"body": body},
         )
         r.raise_for_status()
-        return {"url": r.json()["html_url"]}
+        return f"✅ Đã comment vào PR #{pr} `{repo}`: <{r.json()['html_url']}|xem comment>"
 
 
-async def get_pr_diff(pr: int, repo: str | None = None) -> str:
+# ---------- read tools ----------
+
+async def list_my_prs(state: str = "open") -> str:
+    me = _me()
+    q = f"is:pr is:{state} (author:{me} OR assignee:{me} OR review-requested:{me})"
+    return await search(q, kind="my PRs")
+
+
+async def list_prs(repo: str, state: str = "open", author: str | None = None) -> str:
     repo = _repo(repo)
-    headers = _headers() | {"Accept": "application/vnd.github.v3.diff"}
+    params = {"state": state, "per_page": 30}
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{API}/repos/{repo}/pulls/{pr}", headers=headers)
+        r = await client.get(f"{API}/repos/{repo}/pulls", headers=_headers(), params=params)
         r.raise_for_status()
-        return r.text
+        items = r.json()
+    if author:
+        items = [p for p in items if p["user"]["login"] == author]
+    if not items:
+        return f"_Không có PR `{state}` nào trong `{repo}`._"
+    lines = [f"*PR `{state}` trong `{repo}`* ({len(items)}):"]
+    for p in items[:20]:
+        lines.append(
+            f"• #{p['number']} <{p['html_url']}|{p['title']}> "
+            f"— @{p['user']['login']} · {p.get('draft') and '📝 draft' or '🟢'}"
+        )
+    return "\n".join(lines)
 
+
+async def list_issues(repo: str, state: str = "open", assignee: str | None = None,
+                      label: str | None = None) -> str:
+    repo = _repo(repo)
+    params: dict = {"state": state, "per_page": 30}
+    if assignee:
+        params["assignee"] = assignee
+    if label:
+        params["labels"] = label
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{API}/repos/{repo}/issues", headers=_headers(), params=params)
+        r.raise_for_status()
+        # /issues includes PRs — filter them out
+        items = [i for i in r.json() if "pull_request" not in i]
+    if not items:
+        return f"_Không có issue `{state}` nào trong `{repo}`._"
+    lines = [f"*Issue `{state}` trong `{repo}`* ({len(items)}):"]
+    for i in items[:20]:
+        labels = ", ".join(l["name"] for l in i.get("labels", []))
+        suffix = f" · 🏷 {labels}" if labels else ""
+        lines.append(f"• #{i['number']} <{i['html_url']}|{i['title']}> — @{i['user']['login']}{suffix}")
+    return "\n".join(lines)
+
+
+async def list_notifications(all: bool = False) -> str:
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(
+            f"{API}/notifications",
+            headers=_headers(),
+            params={"all": "true" if all else "false", "per_page": 30},
+        )
+        r.raise_for_status()
+        items = r.json()
+    if not items:
+        return "_Inbox GitHub sạch sẽ 🎉_"
+    lines = [f"*Notifications* ({len(items)} {'all' if all else 'unread'}):"]
+    for n in items[:20]:
+        repo = n["repository"]["full_name"]
+        subj = n["subject"]
+        typ = subj["type"]
+        # subject.url is API URL; convert to html_url best-effort
+        api_url = subj.get("url") or ""
+        html_url = api_url.replace("https://api.github.com/repos/", "https://github.com/") \
+            .replace("/pulls/", "/pull/")
+        lines.append(f"• [{typ}] `{repo}` — <{html_url}|{subj['title']}> · {n['reason']}")
+    return "\n".join(lines)
+
+
+async def search(query: str, kind: str = "search") -> str:
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(
+            f"{API}/search/issues",
+            headers=_headers(),
+            params={"q": query, "per_page": 30},
+        )
+        r.raise_for_status()
+        data = r.json()
+    items = data.get("items", [])
+    total = data.get("total_count", 0)
+    if not items:
+        return f"_Không có kết quả cho `{query}`._"
+    lines = [f"*{kind}* — `{query}` ({total} tổng, hiển thị {min(len(items), 20)}):"]
+    for i in items[:20]:
+        is_pr = "pull_request" in i
+        kind_icon = "🔀" if is_pr else "🐛"
+        repo = "/".join(i["repository_url"].split("/")[-2:])
+        lines.append(
+            f"• {kind_icon} `{repo}` #{i['number']} <{i['html_url']}|{i['title']}> "
+            f"— @{i['user']['login']} · {i['state']}"
+        )
+    return "\n".join(lines)
+
+
+async def get_pr(pr: int, repo: str | None = None) -> str:
+    repo = _repo(repo)
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{API}/repos/{repo}/pulls/{pr}", headers=_headers())
+        r.raise_for_status()
+        p = r.json()
+    body = (p.get("body") or "")[:500]
+    return (
+        f"*PR #{p['number']} `{repo}`* — <{p['html_url']}|{p['title']}>\n"
+        f"@{p['user']['login']} · {p['state']} · +{p['additions']}/-{p['deletions']} · "
+        f"{p['changed_files']} files · base `{p['base']['ref']}` ← `{p['head']['ref']}`\n"
+        f"```{body}```"
+    )
+
+
+async def get_pr_diff(pr: int, repo: str | None = None, max_chars: int = 20000) -> str:
+    repo = _repo(repo)
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.get(
+            f"{API}/repos/{repo}/pulls/{pr}",
+            headers=_headers(accept="application/vnd.github.v3.diff"),
+        )
+        r.raise_for_status()
+        diff = r.text
+    truncated = len(diff) > max_chars
+    if truncated:
+        diff = diff[:max_chars] + f"\n... [truncated, total {len(r.text)} chars]"
+    return f"*PR #{pr} `{repo}` diff*:\n```\n{diff}\n```"
+
+
+# ---------- dispatch ----------
 
 ACTION_HANDLERS = {
-    "github.create_issue": lambda p: create_issue(p["title"], p["body"], p.get("repo")),
-    "github.comment_pr": lambda p: comment_pr(p["pr"], p["body"], p.get("repo")),
+    "github.create_issue":     lambda p: create_issue(p["title"], p["body"], p.get("repo")),
+    "github.comment_pr":       lambda p: comment_pr(p["pr"], p["body"], p.get("repo")),
+    "github.list_my_prs":      lambda p: list_my_prs(p.get("state", "open")),
+    "github.list_prs":         lambda p: list_prs(p["repo"], p.get("state", "open"), p.get("author")),
+    "github.list_issues":      lambda p: list_issues(p["repo"], p.get("state", "open"),
+                                                     p.get("assignee"), p.get("label")),
+    "github.list_notifications": lambda p: list_notifications(bool(p.get("all", False))),
+    "github.search":           lambda p: search(p["query"], p.get("kind", "search")),
+    "github.get_pr":           lambda p: get_pr(p["pr"], p.get("repo")),
+    "github.get_pr_diff":      lambda p: get_pr_diff(p["pr"], p.get("repo"),
+                                                     p.get("max_chars", 20000)),
 }
 
 
-async def execute_action(action_type: str, payload: dict) -> dict:
+async def execute_action(action_type: str, payload: dict) -> str:
     handler = ACTION_HANDLERS.get(action_type)
     if not handler:
         raise ValueError(f"unknown action: {action_type}")

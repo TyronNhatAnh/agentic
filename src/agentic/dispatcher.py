@@ -2,9 +2,8 @@ import logging
 import time
 
 from .agents import REGISTRY
-from .agents.base import ClaudeRunError
 from .brain import Action, BrainDecision, decide
-from .integrations import github
+from .integrations import github, jira
 from .store import log_run, recent_runs_for_thread, touch_thread
 
 log = logging.getLogger(__name__)
@@ -26,15 +25,19 @@ class DispatchResult:
         return body
 
 
-async def _run_action(action: Action) -> str:
+async def _run_action(action: Action) -> tuple[str, str]:
+    """Returns (output_text, status)."""
     try:
         if action.type.startswith("github."):
-            result = await github.execute_action(action.type, action.payload)
-            return f"✅ `{action.type}` → {result}"
-        return f"⚠️ unknown action `{action.type}`"
+            text = await github.execute_action(action.type, action.payload)
+            return text, "ok"
+        if action.type.startswith("jira."):
+            text = await jira.execute_action(action.type, action.payload)
+            return text, "ok"
+        return f"⚠️ unknown action `{action.type}`", "error"
     except Exception as e:
         log.exception("action failed: %s", action.type)
-        return f"❌ `{action.type}` failed: {e}"
+        return f"❌ `{action.type}` failed: {e}", "error"
 
 
 async def handle_message(
@@ -51,7 +54,7 @@ async def handle_message(
     started = time.time()
     try:
         decision: BrainDecision = await decide(text, history)
-    except ClaudeRunError as e:
+    except Exception as e:
         log_run(
             agent="brain",
             input_text=text,
@@ -80,7 +83,7 @@ async def handle_message(
         return f"❓ {decision.clarify_question}"
 
     result = DispatchResult()
-    if decision.reply:
+    if decision.reply and decision.reply.strip().lower() not in {"null", "none"}:
         result.add(decision.reply)
 
     prior_output = ""
@@ -90,32 +93,44 @@ async def handle_message(
             result.errors.append(f"unknown agent `{step.agent}`")
             continue
         t0 = time.time()
+        output: str | None = None
+        status = "error"
+        err: str | None = None
         try:
             output = await runner(step.task, context=prior_output)
             status = "ok"
-            err = None
-        except ClaudeRunError as e:
-            output = None
-            status = "error"
+        except Exception as e:
+            log.exception("agent %s failed", step.agent)
             err = str(e)
             result.errors.append(f"{step.agent}: {e}")
-        finally:
-            log_run(
-                agent=step.agent,
-                input_text=step.task,
-                output=output,
-                status=status if "status" in locals() else "error",
-                duration_ms=int((time.time() - t0) * 1000),
-                thread_ts=thread_ts,
-                channel=channel,
-                user_id=user_id,
-                error=err if "err" in locals() else None,
-            )
+        log_run(
+            agent=step.agent,
+            input_text=step.task,
+            output=output,
+            status=status,
+            duration_ms=int((time.time() - t0) * 1000),
+            thread_ts=thread_ts,
+            channel=channel,
+            user_id=user_id,
+            error=err,
+        )
         if output:
             result.add(f"**[{step.agent}]**\n{output}")
             prior_output = output
 
     for action in decision.actions:
-        result.add(await _run_action(action))
+        t0 = time.time()
+        text, status = await _run_action(action)
+        log_run(
+            agent=f"tool:{action.type}",
+            input_text=str(action.payload),
+            output=text,
+            status=status,
+            duration_ms=int((time.time() - t0) * 1000),
+            thread_ts=thread_ts,
+            channel=channel,
+            user_id=user_id,
+        )
+        result.add(text)
 
     return result.render()

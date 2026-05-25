@@ -80,6 +80,6 @@ async def decide(user_message: str, history: list[dict] | None = None) -> BrainD
     raw = await run_claude(system, user)
     try:
         return parse_decision(raw)
-    except (ValueError, json.JSONDecodeError, KeyError) as e:
+    except Exception as e:
         log.warning("brain parse failed: %s; falling back to raw reply", e)
         return BrainDecision(reply=raw, raw=raw)
