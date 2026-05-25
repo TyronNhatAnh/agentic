@@ -10,6 +10,9 @@ class Settings(BaseSettings):
 
     claude_bin: str = Field(default="claude", alias="CLAUDE_BIN")
     claude_timeout: int = Field(default=300, alias="CLAUDE_TIMEOUT")
+    claude_runtime_dir: str = Field(
+        default="/tmp/agentic-runtime", alias="CLAUDE_RUNTIME_DIR"
+    )
 
     agentic_db: str = Field(default="agentic.db", alias="AGENTIC_DB")
 
@@ -36,6 +39,11 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     worker_concurrency: int = Field(default=4, alias="WORKER_CONCURRENCY")
+
+    max_steps: int = Field(default=5, alias="MAX_STEPS")
+    max_actions: int = Field(default=5, alias="MAX_ACTIONS")
+    max_input_chars: int = Field(default=16000, alias="MAX_INPUT_CHARS")
+    max_context_chars: int = Field(default=8000, alias="MAX_CONTEXT_CHARS")
 
     slack_allowed_channels: str = Field(default="", alias="SLACK_ALLOWED_CHANNELS")
 

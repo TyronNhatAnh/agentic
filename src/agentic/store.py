@@ -68,7 +68,7 @@ _SERVICE_SEEDS = [
     {
         "name": "ggx-kr-user-service",
         "repo_path": "/Users/tyron/Documents/work/Gogox/ggx-kr-user-service",
-        "github_repo": "",
+        "github_repo": "gogovan/ggx-kr-user-service",
         "base_branch_template": "",
         "jira_board_id": 0,
         "aliases": '["user", "user-service", "user services", "user service"]',
@@ -106,6 +106,18 @@ def init_db() -> None:
                     """,
                     (s["name"], s["repo_path"], s["github_repo"],
                      s["base_branch_template"], s["jira_board_id"], s["aliases"]),
+                )
+        else:
+            for s in _SERVICE_SEEDS:
+                if not s["github_repo"]:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE service_repos
+                    SET github_repo=?
+                    WHERE name=? AND (github_repo IS NULL OR github_repo='')
+                    """,
+                    (s["github_repo"], s["name"]),
                 )
 
 
@@ -230,6 +242,22 @@ def resolve_service(name_or_alias: str) -> dict | None:
         except json.JSONDecodeError:
             aliases = []
         if any(a.lower() == needle for a in aliases):
+            return d
+    return None
+
+
+def resolve_service_by_github_repo(repo: str) -> dict | None:
+    """Match a GitHub repo slug to a configured local service."""
+    normalized = repo.strip().lower()
+    repo_name = normalized.rsplit("/", 1)[-1]
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM service_repos").fetchall()
+    for r in rows:
+        d = dict(r)
+        github_repo = (d.get("github_repo") or "").strip().lower()
+        if github_repo and github_repo == normalized:
+            return d
+        if d["name"].lower() == repo_name:
             return d
     return None
 

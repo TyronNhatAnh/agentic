@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
 
@@ -16,6 +16,8 @@ class Job:
     channel: str
     user_id: str | None
     reply: ReplyFn
+    progress: ReplyFn | None = None
+    progress_messages: list[str] = field(default_factory=list)
 
 
 class JobRunner:
@@ -44,7 +46,12 @@ class JobRunner:
         log.info("worker %d started", idx)
         while True:
             job = await self._queue.get()
+            progress_task: asyncio.Task | None = None
             try:
+                if job.progress:
+                    progress_task = asyncio.create_task(
+                        self._progress_loop(job), name=f"agentic-progress-{idx}"
+                    )
                 reply = await self._handler(
                     job.text,
                     thread_ts=job.thread_ts,
@@ -65,5 +72,29 @@ class JobRunner:
                 except Exception:
                     log.exception("worker %d fallback reply also failed", idx)
             finally:
+                if progress_task:
+                    progress_task.cancel()
+                    try:
+                        await progress_task
+                    except asyncio.CancelledError:
+                        pass
                 self._busy.discard(job.thread_ts)
                 self._queue.task_done()
+
+    async def _progress_loop(self, job: Job) -> None:
+        messages = job.progress_messages or ["⏳ Đang xử lý..."]
+        try:
+            for i, msg in enumerate(messages):
+                await asyncio.sleep(5 if i == 0 else 10)
+                if job.progress:
+                    await job.progress(msg)
+            i = len(messages)
+            while True:
+                await asyncio.sleep(10)
+                if job.progress:
+                    await job.progress(messages[-1])
+                i += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("progress update failed")

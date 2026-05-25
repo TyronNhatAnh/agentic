@@ -5,14 +5,17 @@ import pytest
 
 os.environ.setdefault("AGENTIC_DB", tempfile.mktemp(suffix=".db"))
 
+from agentic.agents import ba, dev, po, review  # noqa: E402
 from agentic import dispatcher  # noqa: E402
-from agentic.brain import BrainDecision, Step  # noqa: E402
-from agentic.store import init_db  # noqa: E402
+from agentic.brain import Action, BrainDecision, Step  # noqa: E402
+from agentic.integrations.result import ToolResult  # noqa: E402
+from agentic.store import init_db, resolve_service_by_github_repo  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _db():
+def _db(monkeypatch):
     init_db()
+    monkeypatch.setattr(dispatcher, "maybe_schedule_summary", lambda thread_ts: None)
 
 
 async def _fake_decide(message, *, summary=None, messages=None):
@@ -38,6 +41,28 @@ async def test_dispatcher_runs_single_agent(monkeypatch):
     assert "[ba]" in out
 
 
+async def test_subagents_append_prompts_to_claude_code_default(monkeypatch):
+    calls = []
+
+    async def fake_run_claude(system_prompt, user_prompt, **kwargs):
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(ba, "run_claude", fake_run_claude)
+    monkeypatch.setattr(po, "run_claude", fake_run_claude)
+    monkeypatch.setattr(dev, "run_claude", fake_run_claude)
+    monkeypatch.setattr(review, "run_claude", fake_run_claude)
+
+    await ba.run_ba("story")
+    await po.run_po("prd")
+    await dev.run_dev("fix", cwd="/tmp/repo")
+    await review.run_review("review", cwd="/tmp/repo")
+
+    assert [c.get("prompt_mode") for c in calls] == ["append", "append", "append", "append"]
+    assert calls[2]["cwd"] == "/tmp/repo"
+    assert calls[3]["cwd"] == "/tmp/repo"
+
+
 async def test_dispatcher_clarification(monkeypatch):
     async def clarify(msg, *, summary=None, messages=None):
         return BrainDecision(need_clarification=True, clarify_question="Which repo?")
@@ -47,3 +72,206 @@ async def test_dispatcher_clarification(monkeypatch):
         "do stuff", thread_ts="t2", channel="C1", user_id="U1"
     )
     assert "Which repo?" in out
+
+
+async def test_dispatcher_auto_reviews_fetched_pr_diff(monkeypatch):
+    diff = "*PR #431 `gogovan/ggx-kr-user-service` diff*:\n```diff\n+new code\n```"
+    seen = {}
+
+    async def decide_review_pr(msg, *, summary=None, messages=None):
+        return BrainDecision(
+            reply=None,
+            actions=[
+                Action(
+                    type="github.get_pr_diff",
+                    payload={"repo": "gogovan/ggx-kr-user-service", "pr": 431},
+                )
+            ],
+            raw="(mocked)",
+        )
+
+    async def fake_run_action(action):
+        return ToolResult.success(diff)
+
+    async def fake_prepare_pr_review_workspace(repo, pr):
+        return ToolResult.success(
+            {
+                "service": "ggx-kr-user-service",
+                "repo_path": "/tmp/pr-431",
+                "sha": "abc123",
+                "message": "Local PR workspace ready: `/tmp/pr-431`.",
+            }
+        )
+
+    async def fake_review(task, context="", cwd=None):
+        seen["task"] = task
+        seen["context"] = context
+        seen["cwd"] = cwd
+        return "🔍 **Review: gogovan/ggx-kr-user-service#431**\n\n### ⛔ Blocking issues\nNone"
+
+    async def fail_shrink(text):
+        raise AssertionError("review output should not be passed through reply shrinker")
+
+    monkeypatch.setattr(dispatcher, "decide", decide_review_pr)
+    monkeypatch.setattr(dispatcher, "_run_action", fake_run_action)
+    monkeypatch.setattr(
+        dispatcher.git_int,
+        "prepare_pr_review_workspace",
+        fake_prepare_pr_review_workspace,
+    )
+    monkeypatch.setattr(dispatcher, "_shrink_reply", fail_shrink)
+    monkeypatch.setitem(dispatcher.REGISTRY, "review", fake_review)
+
+    out = await dispatcher.handle_message(
+        "review pr https://github.com/gogovan/ggx-kr-user-service/pull/431",
+        thread_ts="t-review-auto-fetched-pr-diff",
+        channel="C1",
+        user_id="U1",
+    )
+
+    assert "[review]" in out
+    assert "Blocking issues" in out
+    assert diff in seen["context"]
+    assert "Local PR workspace ready" in seen["context"]
+    assert seen["cwd"] == "/tmp/pr-431"
+    assert "PR #431" in seen["task"]
+
+
+async def test_dispatcher_fixes_fetched_pr_diff_in_local_workspace(monkeypatch):
+    diff = "*PR #431 `gogovan/ggx-kr-user-service` diff*:\n```diff\n+buggy code\n```"
+    seen = {}
+
+    async def decide_fix_pr(msg, *, summary=None, messages=None):
+        return BrainDecision(
+            reply=None,
+            actions=[
+                Action(
+                    type="github.get_pr_diff",
+                    payload={"repo": "gogovan/ggx-kr-user-service", "pr": 431},
+                )
+            ],
+            raw="(mocked)",
+        )
+
+    async def fake_run_action(action):
+        return ToolResult.success(diff)
+
+    async def fake_prepare_pr_review_workspace(repo, pr):
+        return ToolResult.success(
+            {
+                "service": "ggx-kr-user-service",
+                "repo_path": "/tmp/pr-431",
+                "sha": "abc123",
+                "message": "Local PR workspace ready: `/tmp/pr-431`.",
+            }
+        )
+
+    async def fake_dev(task, context="", cwd=None, apply_changes=False):
+        seen["task"] = task
+        seen["context"] = context
+        seen["cwd"] = cwd
+        seen["apply_changes"] = apply_changes
+        return "Đã sửa handler.go và chạy go test ./internal/..."
+
+    monkeypatch.setattr(dispatcher, "decide", decide_fix_pr)
+    monkeypatch.setattr(dispatcher, "_run_action", fake_run_action)
+    monkeypatch.setattr(
+        dispatcher.git_int,
+        "prepare_pr_review_workspace",
+        fake_prepare_pr_review_workspace,
+    )
+    async def fake_shrink(text):
+        return text
+
+    monkeypatch.setattr(dispatcher, "_shrink_reply", fake_shrink)
+    monkeypatch.setitem(dispatcher.REGISTRY, "dev", fake_dev)
+
+    out = await dispatcher.handle_message(
+        "fix 3 critical trong PR https://github.com/gogovan/ggx-kr-user-service/pull/431",
+        thread_ts="t-fix-pr",
+        channel="C1",
+        user_id="U1",
+    )
+
+    assert "[dev]" in out
+    assert "Đã sửa handler.go" in out
+    assert diff in seen["context"]
+    assert seen["cwd"] == "/tmp/pr-431"
+    assert seen["apply_changes"] is True
+    assert "Fix request" in seen["task"]
+
+
+async def test_dispatcher_checks_local_repo_status_without_jira_ticket(monkeypatch):
+    seen = {}
+
+    async def fail_decide(*args, **kwargs):
+        raise AssertionError("repo status question should bypass brain")
+
+    async def fake_run_action(action):
+        seen["action"] = action
+        return ToolResult.success("Có repo local cho `gogovan/ggx-kr-user-service` nha")
+
+    monkeypatch.setattr(dispatcher, "decide", fail_decide)
+    monkeypatch.setattr(dispatcher, "_run_action", fake_run_action)
+
+    thread_ts = "t-repo-status"
+    await dispatcher.handle_message(
+        "review pr https://github.com/gogovan/ggx-kr-user-service/pull/431",
+        thread_ts=thread_ts,
+        channel="C1",
+        user_id="U1",
+    )
+
+    out = await dispatcher.handle_message(
+        "ko cần jira tui đang hỏi có repo chưa thôi",
+        thread_ts=thread_ts,
+        channel="C1",
+        user_id="U1",
+    )
+
+    assert "Có repo local" in out
+    assert seen["action"].type == "git.check_repo"
+    assert seen["action"].payload == {"repo": "gogovan/ggx-kr-user-service"}
+
+
+def test_seeded_service_resolves_by_github_repo():
+    svc = resolve_service_by_github_repo("gogovan/ggx-kr-user-service")
+
+    assert svc is not None
+    assert svc["name"] == "ggx-kr-user-service"
+
+
+async def test_dispatcher_synthesizes_read_action_outputs(monkeypatch):
+    seen = {}
+
+    async def decide_get_issue(msg, *, summary=None, messages=None):
+        return BrainDecision(
+            reply=None,
+            actions=[Action(type="jira.get_issue", payload={"key": "KRP-123"})],
+            raw="(mocked)",
+        )
+
+    async def fake_run_action(action):
+        return ToolResult.success(
+            "*KRP-123* — Driver docs\n\n*Description / specs:*\nLookup driver by user ID."
+        )
+
+    async def fake_synthesize(**kwargs):
+        seen.update(kwargs)
+        return "KRP-123 specs: lookup driver by user ID."
+
+    monkeypatch.setattr(dispatcher, "decide", decide_get_issue)
+    monkeypatch.setattr(dispatcher, "_run_action", fake_run_action)
+    monkeypatch.setattr(dispatcher, "_synthesize_action_reply", fake_synthesize)
+
+    out = await dispatcher.handle_message(
+        "docs/specs KRP-123 là gì?",
+        thread_ts="t-jira-docs",
+        channel="C1",
+        user_id="U1",
+    )
+
+    assert out == "KRP-123 specs: lookup driver by user ID."
+    assert seen["user_text"] == "docs/specs KRP-123 là gì?"
+    assert seen["tool_outputs"][0][0] == "jira.get_issue"
+    assert "Lookup driver" in seen["tool_outputs"][0][1]

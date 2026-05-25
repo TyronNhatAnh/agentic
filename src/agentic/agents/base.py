@@ -23,25 +23,32 @@ async def run_claude(
     *,
     cwd: str | None = None,
     timeout: int | None = None,
+    prompt_mode: str = "system",
+    permission_mode: str | None = None,
 ) -> str:
     """Invoke `claude -p` as a subprocess and return stdout text.
 
     Relies on the user having `claude` installed and authenticated.
     """
     timeout = timeout or settings.claude_timeout
+    run_cwd = cwd or settings.claude_runtime_dir
+    Path(run_cwd).mkdir(parents=True, exist_ok=True)
+    prompt_flag = "--append-system-prompt" if prompt_mode == "append" else "--system-prompt"
     args = [
         settings.claude_bin,
         "-p",
         user_prompt,
-        "--system-prompt",
+        prompt_flag,
         system_prompt,
         "--output-format",
         "text",
     ]
+    if permission_mode:
+        args.extend(["--permission-mode", permission_mode])
     log.debug("running claude: %s chars sys / %s chars user", len(system_prompt), len(user_prompt))
     proc = await asyncio.create_subprocess_exec(
         *args,
-        cwd=cwd,
+        cwd=run_cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

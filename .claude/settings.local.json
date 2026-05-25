@@ -65,7 +65,9 @@
       "Bash(cp:*)",
       "Bash(mv:*)",
       "Bash(.venv/bin/python *)",
-      "Bash(PYTHONPATH=* .venv/bin/python *)"
+      "Bash(PYTHONPATH=* .venv/bin/python *)",
+      "Bash(.venv/bin/pytest -q)",
+      "Bash(gh:*)"
     ],
     "deny": [
       "Read(//Users/tyron/Projects/agentic/.env)",

@@ -45,6 +45,29 @@ def _adf(text: str) -> dict:
     }
 
 
+def _adf_to_text(node) -> str:
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, list):
+        return "\n".join(part for part in (_adf_to_text(n) for n in node) if part)
+    if not isinstance(node, dict):
+        return ""
+
+    text = node.get("text") or ""
+    content = _adf_to_text(node.get("content"))
+    node_type = node.get("type")
+    if node_type in {"paragraph", "heading", "blockquote"}:
+        return (text + ("\n" if text and content else "") + content).strip()
+    if node_type in {"bulletList", "orderedList"}:
+        return content
+    if node_type == "listItem":
+        item = content.strip()
+        return f"- {item}" if item else ""
+    return (text + content).strip()
+
+
 def _fmt_issue_line(i: dict) -> str:
     f = i.get("fields", {})
     status = (f.get("status") or {}).get("name", "?")
@@ -110,7 +133,9 @@ async def get_issue(key: str) -> ToolResult:
     async with _client() as c:
         r = await c.get(
             f"{_base()}/rest/api/3/issue/{key}",
-            params={"fields": "summary,status,assignee,reporter,priority,issuetype"},
+            params={
+                "fields": "summary,status,assignee,reporter,priority,issuetype,description"
+            },
         )
         r.raise_for_status()
         i = r.json()
@@ -120,10 +145,16 @@ async def get_issue(key: str) -> ToolResult:
     reporter = (f.get("reporter") or {}).get("displayName") or "?"
     priority = (f.get("priority") or {}).get("name") or "?"
     itype = (f.get("issuetype") or {}).get("name") or "?"
-    return ToolResult.success(
+    description = _adf_to_text(f.get("description")).strip()
+    if len(description) > 4000:
+        description = description[:3900] + "\n…[description cắt bớt]"
+    body = (
         f"*<{_browse_url(i['key'])}|{i['key']}>* — {f.get('summary','')}\n"
         f"{itype} · {status} · prio {priority} · @{assignee} (reporter @{reporter})"
     )
+    if description:
+        body += f"\n\n*Description / specs:*\n{description}"
+    return ToolResult.success(body)
 
 
 async def search_jql(jql: str, max_results: int = 20, kind: str = "Kết quả") -> ToolResult:

@@ -42,6 +42,16 @@ When adding a new agent: create `src/agentic/agents/<name>.py` that exposes `asy
 
 When adding a new integration action: extend the relevant `integrations/*.py` `execute_action(type, payload)` dispatcher and return a `ToolResult` (see [integrations/result.py](src/agentic/integrations/result.py)). `error_code` values `AUTH`/`CONFIG`/`VALIDATION`/`NOT_FOUND` render as ⚠️ (non-retryable user errors); others render as ❌. Action `type` must use the `<integration>.<verb>` prefix — the dispatcher routes on prefix.
 
+## Design principle: let the model reason
+
+This bot is powered by a capable model; do not turn it into a brittle rule engine.
+
+- Prefer passing high-quality thread context, tool outputs, and structured state to the brain/agents so the model can decide intent, continuity, and whether a request was already handled.
+- Keep Python code focused on deterministic plumbing: Slack delivery, job orchestration, retries, persistence, tool execution, output formatting, and hard safety/validation boundaries.
+- Avoid overfitting user intent with hard-coded phrase checks such as "if the user says X, always do Y" unless it protects a real integration boundary or prevents a concrete failure.
+- If behavior seems wrong, first improve the context/prompt contract or agent handoff. Add rules only when the decision is truly deterministic and cheaper/safer outside the model.
+- For repeated requests, prefer giving the brain enough recent history and summaries to answer naturally over implementing per-intent duplicate detectors.
+
 ## Persistence
 
 SQLite at `AGENTIC_DB` (default `agentic.db`). Schema in [store.py](src/agentic/store.py):

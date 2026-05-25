@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 from ..config import settings
-from ..store import resolve_service
+from ..store import resolve_service, resolve_service_by_github_repo
 from . import jira as jira_int
 from .result import ToolResult, classify_exception
 
@@ -35,6 +35,48 @@ async def _run_git(*args: str, cwd: str | None = None) -> tuple[int, str, str]:
 async def _branch_exists(repo_path: str, ref: str) -> bool:
     rc, _, _ = await _run_git("rev-parse", "--verify", "--quiet", ref, cwd=repo_path)
     return rc == 0
+
+
+async def check_repo(service: str | None = None, repo: str | None = None) -> ToolResult:
+    """Read-only check for local service repository mapping and checkout status."""
+    svc = None
+    if repo:
+        svc = resolve_service_by_github_repo(repo)
+    if not svc and service:
+        svc = resolve_service(service)
+    if not svc:
+        target = repo or service or "repo/service"
+        return ToolResult.failure(
+            "NOT_FOUND",
+            f"Chưa có mapping local cho `{target}` trong service_repos.",
+        )
+
+    repo_path = Path(svc["repo_path"])
+    github_repo = svc.get("github_repo") or "(chưa set github_repo)"
+    if not repo_path.is_dir():
+        return ToolResult.failure(
+            "CONFIG",
+            f"Có mapping `{svc['name']}` → `{repo_path}`, nhưng path chưa tồn tại.",
+        )
+    if not Path(repo_path, ".git").exists():
+        return ToolResult.failure(
+            "CONFIG",
+            f"Có path `{repo_path}`, nhưng không phải git repo.",
+        )
+
+    rc, branch, _ = await _run_git("branch", "--show-current", cwd=str(repo_path))
+    if rc != 0 or not branch:
+        branch = "(detached hoặc không đọc được branch)"
+    rc, status, _ = await _run_git("status", "--porcelain", cwd=str(repo_path))
+    dirty = bool(status.strip()) if rc == 0 else None
+    dirty_text = "dirty" if dirty else "clean"
+    return ToolResult.success(
+        f"Có repo local cho `{github_repo}` nha:\n"
+        f"• Service: `{svc['name']}`\n"
+        f"• Path: `{repo_path}`\n"
+        f"• Branch: `{branch}`\n"
+        f"• Status: `{dirty_text}`"
+    )
 
 
 async def _resolve_base_branch(service: dict) -> str:
@@ -156,6 +198,70 @@ async def prepare_workspace(service: str, ticket: str,
     )
 
 
+async def prepare_pr_review_workspace(repo: str, pr: int) -> ToolResult:
+    """Create or update a detached local worktree at the PR head for review."""
+    svc = resolve_service_by_github_repo(repo)
+    if not svc:
+        return ToolResult.failure(
+            "NOT_FOUND",
+            f"Không tìm thấy local repo mapping cho `{repo}` trong service_repos.",
+        )
+
+    repo_path = svc["repo_path"]
+    if not Path(repo_path).is_dir() or not Path(repo_path, ".git").exists():
+        return ToolResult.failure(
+            "CONFIG",
+            f"Repo path `{repo_path}` chưa tồn tại hoặc chưa phải git repo.",
+        )
+
+    fetch_ref = f"pull/{pr}/head"
+    rc, _, err = await _run_git("fetch", "origin", fetch_ref, cwd=repo_path)
+    if rc != 0:
+        return ToolResult.failure("GIT_FETCH", f"git fetch `{fetch_ref}` lỗi: {err[:300]}")
+
+    rc, sha, err = await _run_git("rev-parse", "--verify", "FETCH_HEAD", cwd=repo_path)
+    if rc != 0 or not sha:
+        return ToolResult.failure("GIT_FETCH", f"Không resolve được FETCH_HEAD: {err[:300]}")
+
+    worktree_path = Path(settings.worktree_dir) / "_pr_reviews" / svc["name"] / f"pr-{pr}"
+    if worktree_path.exists():
+        if not Path(worktree_path, ".git").exists():
+            return ToolResult.failure(
+                "CONFIG",
+                f"Path review `{worktree_path}` đã tồn tại nhưng không phải git worktree.",
+            )
+        rc, status, err = await _run_git("status", "--porcelain", cwd=str(worktree_path))
+        if rc != 0:
+            return ToolResult.failure("GIT_STATUS", f"git status lỗi: {err[:300]}")
+        if status.strip():
+            return ToolResult.failure(
+                "DIRTY_WORKTREE",
+                f"Review worktree `{worktree_path}` đang có thay đổi local, không tự checkout.",
+            )
+        rc, _, err = await _run_git("checkout", "--detach", sha, cwd=str(worktree_path))
+        if rc != 0:
+            return ToolResult.failure("GIT_CHECKOUT", f"git checkout PR head lỗi: {err[:300]}")
+    else:
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        rc, _, err = await _run_git(
+            "worktree", "add", "--detach", str(worktree_path), sha, cwd=repo_path
+        )
+        if rc != 0:
+            return ToolResult.failure("GIT_WORKTREE", f"git worktree add lỗi: {err[:300]}")
+
+    return ToolResult.success(
+        {
+            "service": svc["name"],
+            "repo_path": str(worktree_path),
+            "sha": sha,
+            "message": (
+                f"Local PR workspace ready: `{worktree_path}` "
+                f"(service `{svc['name']}`, sha `{sha[:12]}`)."
+            ),
+        }
+    )
+
+
 def _needs_confirmation(*, service: str, ticket: str, base: str,
                         question: str) -> ToolResult:
     """Special ToolResult that the dispatcher persists as pending_confirmation."""
@@ -171,8 +277,12 @@ def _needs_confirmation(*, service: str, ticket: str, base: str,
 # ---------- dispatch ----------
 
 ACTION_HANDLERS = {
+    "git.check_repo": lambda p: check_repo(p.get("service"), p.get("repo")),
     "git.prepare_workspace": lambda p: prepare_workspace(
         p["service"], p["ticket"], bool(p.get("confirmed", False))
+    ),
+    "git.prepare_pr_review_workspace": lambda p: prepare_pr_review_workspace(
+        p["repo"], int(p["pr"])
     ),
 }
 

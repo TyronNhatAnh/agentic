@@ -68,10 +68,19 @@ def _format_messages(messages: list[dict]) -> str:
     if not messages:
         return ""
     lines = []
+    budget = 12000
     for m in messages:
         role = m.get("role", "?")
-        text = (m.get("text") or "").strip().replace("\n", " ")[:400]
-        lines.append(f"{role}: {text}")
+        text = (m.get("text") or "").strip()
+        line = f"{role}: {text}"
+        if len(line) > 2500:
+            line = line[:2400] + f"\n…[message cắt bớt {len(line) - 2400} ký tự]"
+        if sum(len(existing) for existing in lines) + len(line) > budget:
+            remaining = max(0, budget - sum(len(existing) for existing in lines))
+            if remaining > 200:
+                lines.append(line[:remaining] + "\n…[history cắt bớt]")
+            break
+        lines.append(line)
     return "\n".join(lines)
 
 
