@@ -64,8 +64,8 @@
       "Bash(touch:*)",
       "Bash(cp:*)",
       "Bash(mv:*)",
-      "Bash(PYTHONPATH=src .venv/bin/python -m pytest -x -q)",
-      "Bash(PYTHONPATH=src .venv/bin/python -c ' *)"
+      "Bash(.venv/bin/python *)",
+      "Bash(PYTHONPATH=* .venv/bin/python *)"
     ],
     "deny": [
       "Read(//Users/tyron/Projects/agentic/.env)",

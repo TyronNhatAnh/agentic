@@ -131,6 +131,31 @@ async def search_jql(jql: str, max_results: int = 20, kind: str = "Kết quả")
     return await _search_jql(jql, kind, max_results)
 
 
+async def get_active_sprint(board_id: int | None = None) -> dict:
+    """Return {'id': int, 'name': str, 'number': int|None} for the active sprint.
+
+    Raises RuntimeError if no board configured / no active sprint found.
+    """
+    bid = board_id or settings.jira_board_id
+    if not bid:
+        raise RuntimeError("JIRA_BOARD_ID chưa cấu hình")
+    async with _client() as c:
+        r = await c.get(
+            f"{_base()}/rest/agile/1.0/board/{bid}/sprint",
+            params={"state": "active"},
+        )
+        r.raise_for_status()
+        sprints = r.json().get("values", [])
+    if not sprints:
+        raise RuntimeError(f"Không có active sprint trên board {bid}")
+    s = sprints[0]
+    name = s.get("name", "")
+    # Extract trailing integer from sprint name (e.g. "DAPro-2.126" -> 126, "Sprint 126" -> 126)
+    import re as _re
+    m = _re.search(r"(\d+)(?!.*\d)", name)
+    return {"id": s["id"], "name": name, "number": int(m.group(1)) if m else None}
+
+
 # ---------- named intents (write) ----------
 
 async def create_issue(summary: str, description: str = "",

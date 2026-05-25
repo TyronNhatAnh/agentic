@@ -56,8 +56,14 @@ class JobRunner:
                 reply = f"❌ {e}"
             try:
                 await job.reply(reply)
-            except Exception:
+            except Exception as e:
                 log.exception("worker %d reply failed", idx)
+                # Placeholder ("Đang xử lý...") sẽ kẹt nếu không update lại.
+                # Thử lần nữa với message ngắn báo lỗi để user biết.
+                try:
+                    await job.reply(f"❌ Lỗi gửi phản hồi: {type(e).__name__}")
+                except Exception:
+                    log.exception("worker %d fallback reply also failed", idx)
             finally:
                 self._busy.discard(job.thread_ts)
                 self._queue.task_done()

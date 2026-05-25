@@ -21,6 +21,17 @@ class Settings(BaseSettings):
     jira_email: str = Field(default="", alias="JIRA_EMAIL")
     jira_api_token: str = Field(default="", alias="JIRA_API_TOKEN")
     jira_default_project: str = Field(default="", alias="JIRA_DEFAULT_PROJECT")
+    jira_board_id: int = Field(default=0, alias="JIRA_BOARD_ID")
+
+    workspace_dir: str = Field(
+        default="/Users/tyron/Documents/work/Gogox", alias="WORKSPACE_DIR"
+    )
+    worktree_dir: str = Field(
+        default="/Users/tyron/Documents/work/Gogox/.worktrees", alias="WORKTREE_DIR"
+    )
+    base_branch_template: str = Field(
+        default="releases/DAPro-2.{sprint}", alias="BASE_BRANCH_TEMPLATE"
+    )
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 

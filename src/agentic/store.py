@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -44,7 +45,35 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_ts, id);
+
+CREATE TABLE IF NOT EXISTS service_repos (
+    name TEXT PRIMARY KEY,
+    repo_path TEXT NOT NULL,
+    github_repo TEXT,
+    base_branch_template TEXT,
+    jira_board_id INTEGER,
+    aliases TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pending_confirmations (
+    thread_ts TEXT PRIMARY KEY,
+    action_type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    question TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 """
+
+_SERVICE_SEEDS = [
+    {
+        "name": "ggx-kr-user-service",
+        "repo_path": "/Users/tyron/Documents/work/Gogox/ggx-kr-user-service",
+        "github_repo": "",
+        "base_branch_template": "",
+        "jira_board_id": 0,
+        "aliases": '["user", "user-service", "user services", "user service"]',
+    },
+]
 
 _THREAD_ADDED_COLUMNS = {
     "summary": "TEXT",
@@ -61,11 +90,23 @@ def init_db() -> None:
     Path(settings.agentic_db).parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(SCHEMA)
-        # Migrate existing DBs that pre-date the new columns.
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(threads)")}
         for col, decl in _THREAD_ADDED_COLUMNS.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE threads ADD COLUMN {col} {decl}")
+        # Seed service_repos if empty
+        row = conn.execute("SELECT COUNT(*) AS n FROM service_repos").fetchone()
+        if row["n"] == 0:
+            for s in _SERVICE_SEEDS:
+                conn.execute(
+                    """
+                    INSERT INTO service_repos(name, repo_path, github_repo,
+                                              base_branch_template, jira_board_id, aliases)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (s["name"], s["repo_path"], s["github_repo"],
+                     s["base_branch_template"], s["jira_board_id"], s["aliases"]),
+                )
 
 
 @contextmanager
@@ -173,6 +214,68 @@ def count_messages(thread_ts: str) -> int:
             "SELECT COUNT(*) AS n FROM messages WHERE thread_ts=?", (thread_ts,)
         ).fetchone()
         return int(row["n"])
+
+
+def resolve_service(name_or_alias: str) -> dict | None:
+    """Match a service by canonical name or any alias (case-insensitive)."""
+    needle = name_or_alias.strip().lower()
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM service_repos").fetchall()
+    for r in rows:
+        d = dict(r)
+        if d["name"].lower() == needle:
+            return d
+        try:
+            aliases = json.loads(d.get("aliases") or "[]")
+        except json.JSONDecodeError:
+            aliases = []
+        if any(a.lower() == needle for a in aliases):
+            return d
+    return None
+
+
+def list_services() -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM service_repos ORDER BY name").fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_pending_confirmation(thread_ts: str, action_type: str,
+                              payload: dict, question: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO pending_confirmations(thread_ts, action_type, payload,
+                                              question, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(thread_ts) DO UPDATE SET
+                action_type=excluded.action_type,
+                payload=excluded.payload,
+                question=excluded.question,
+                created_at=excluded.created_at
+            """,
+            (thread_ts, action_type, json.dumps(payload), question, time.time()),
+        )
+
+
+def get_pending_confirmation(thread_ts: str) -> dict | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM pending_confirmations WHERE thread_ts=?", (thread_ts,)
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        d["payload"] = json.loads(d["payload"])
+    except json.JSONDecodeError:
+        d["payload"] = {}
+    return d
+
+
+def clear_pending_confirmation(thread_ts: str) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM pending_confirmations WHERE thread_ts=?", (thread_ts,))
 
 
 def recent_runs_for_thread(thread_ts: str, limit: int = 20) -> list[dict]:

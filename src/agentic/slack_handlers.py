@@ -50,18 +50,28 @@ def register(app: AsyncApp, runner: JobRunner) -> None:
 
         raw = event.get("text") or ""
         text = _clean(raw)
-        if not text:
-            return
         thread_ts = event.get("thread_ts") or event["ts"]
         user_id = event.get("user")
+
+        if not text:
+            await client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text="Bạn cần gì? Mention mình kèm nội dung nha.",
+            )
+            return
 
         placeholder = await client.chat_postMessage(
             channel=channel, thread_ts=thread_ts, text="Đang xử lý..."
         )
 
         async def reply(msg: str) -> None:
+            # Slack chat.update rejects long text with msg_too_long well below
+            # the documented 40k limit; dispatcher already summarizes, this is
+            # the last-resort safety net.
+            safe = msg if len(msg) <= 1000 else msg[:980] + "\n…(cắt)"
             await client.chat_update(
-                channel=channel, ts=placeholder["ts"], text=msg[:39000]
+                channel=channel, ts=placeholder["ts"], text=safe
             )
 
         job = Job(
