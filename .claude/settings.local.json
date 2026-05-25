@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /opt/homebrew/bin/python3* /usr/local/bin/python3* 2>/dev/null; which python3.11 python3.12 python3.13 2>/dev/null)",
+      "Read(//opt/homebrew/bin/**)"
+    ]
+  }
+}
