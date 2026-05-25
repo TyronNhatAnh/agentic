@@ -1,6 +1,7 @@
 import httpx
 
 from ..config import settings
+from .result import ToolResult, classify_exception
 
 API = "https://api.github.com"
 
@@ -202,8 +203,12 @@ ACTION_HANDLERS = {
 }
 
 
-async def execute_action(action_type: str, payload: dict) -> str:
+async def execute_action(action_type: str, payload: dict) -> ToolResult:
     handler = ACTION_HANDLERS.get(action_type)
     if not handler:
-        raise ValueError(f"unknown action: {action_type}")
-    return await handler(payload)
+        return ToolResult.failure("UNKNOWN_ACTION", f"unknown action `{action_type}`")
+    try:
+        text = await handler(payload)
+        return ToolResult.success(text)
+    except Exception as e:
+        return classify_exception(e, service="GitHub")

@@ -3,65 +3,79 @@ import re
 
 from slack_bolt.async_app import AsyncApp
 
-from .dispatcher import handle_message
+from .config import settings
+from .worker import Job, JobRunner
 
 log = logging.getLogger(__name__)
 
 _MENTION_RE = re.compile(r"<@[A-Z0-9]+>\s*")
+_BUSY_MSG = "⏳ Đang chạy job trước rồi, đợi xíu nha."
+
+_channel_name_cache: dict[str, str] = {}
 
 
 def _clean(text: str) -> str:
     return _MENTION_RE.sub("", text or "").strip()
 
 
-def register(app: AsyncApp) -> None:
+async def _channel_name(client, channel_id: str) -> str | None:
+    cached = _channel_name_cache.get(channel_id)
+    if cached is not None:
+        return cached
+    try:
+        resp = await client.conversations_info(channel=channel_id)
+        name = (resp.get("channel") or {}).get("name") or ""
+    except Exception as e:
+        log.warning("conversations_info failed for %s: %s", channel_id, e)
+        return None
+    _channel_name_cache[channel_id] = name.lower()
+    return _channel_name_cache[channel_id]
+
+
+def register(app: AsyncApp, runner: JobRunner) -> None:
+    allowed = settings.allowed_channel_names
+
+    async def _is_allowed(client, channel_id: str) -> bool:
+        if not allowed:
+            return True
+        name = await _channel_name(client, channel_id)
+        return name in allowed if name else False
+
     @app.event("app_mention")
-    async def on_mention(event, say, client):
-        text = _clean(event.get("text", ""))
+    async def on_mention(event, client):
+        channel = event["channel"]
+        if not await _is_allowed(client, channel):
+            log.info("ignoring mention from non-allowlisted channel %s", channel)
+            return
+
+        raw = event.get("text") or ""
+        text = _clean(raw)
         if not text:
             return
-        channel = event["channel"]
         thread_ts = event.get("thread_ts") or event["ts"]
         user_id = event.get("user")
 
         placeholder = await client.chat_postMessage(
-            channel=channel, thread_ts=thread_ts, text="🧠 Đang xử lý..."
+            channel=channel, thread_ts=thread_ts, text="Đang xử lý..."
         )
-        try:
-            reply = await handle_message(
-                text, thread_ts=thread_ts, channel=channel, user_id=user_id
+
+        async def reply(msg: str) -> None:
+            await client.chat_update(
+                channel=channel, ts=placeholder["ts"], text=msg[:39000]
             )
-        except Exception as e:
-            log.exception("dispatcher error")
-            reply = f"❌ {e}"
-        await client.chat_update(
-            channel=channel, ts=placeholder["ts"], text=reply[:39000]
+
+        job = Job(
+            text=text,
+            thread_ts=thread_ts,
+            channel=channel,
+            user_id=user_id,
+            reply=reply,
         )
+        accepted = await runner.submit(job)
+        if not accepted:
+            await reply(_BUSY_MSG)
 
     @app.event("message")
-    async def on_dm(event, say, client):
-        # Only DMs to the bot, ignore channel chatter and bot echoes.
-        if event.get("channel_type") != "im":
-            return
-        if event.get("bot_id") or event.get("subtype"):
-            return
-        text = (event.get("text") or "").strip()
-        if not text:
-            return
-        channel = event["channel"]
-        thread_ts = event.get("thread_ts") or event["ts"]
-        user_id = event.get("user")
-
-        placeholder = await client.chat_postMessage(
-            channel=channel, thread_ts=thread_ts, text="🧠 Đang xử lý..."
-        )
-        try:
-            reply = await handle_message(
-                text, thread_ts=thread_ts, channel=channel, user_id=user_id
-            )
-        except Exception as e:
-            log.exception("dispatcher error")
-            reply = f"❌ {e}"
-        await client.chat_update(
-            channel=channel, ts=placeholder["ts"], text=reply[:39000]
-        )
+    async def on_message(event, client):
+        # DM disabled by policy; ignore everything that isn't an app_mention.
+        return

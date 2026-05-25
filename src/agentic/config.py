@@ -24,5 +24,17 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
+    worker_concurrency: int = Field(default=4, alias="WORKER_CONCURRENCY")
+
+    slack_allowed_channels: str = Field(default="", alias="SLACK_ALLOWED_CHANNELS")
+
+    @property
+    def allowed_channel_names(self) -> set[str]:
+        return {
+            name.strip().lstrip("#").lower()
+            for name in self.slack_allowed_channels.split(",")
+            if name.strip()
+        }
+
 
 settings = Settings()

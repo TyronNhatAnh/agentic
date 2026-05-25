@@ -5,8 +5,10 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 
 from .config import settings
+from .dispatcher import handle_message
 from .slack_handlers import register
 from .store import init_db
+from .worker import JobRunner
 
 
 def _setup_logging() -> None:
@@ -23,9 +25,13 @@ async def _main() -> None:
         raise SystemExit("SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set")
 
     app = AsyncApp(token=settings.slack_bot_token)
-    register(app)
+    runner = JobRunner(handle_message, concurrency=settings.worker_concurrency)
+    runner.start()
+    register(app, runner)
     handler = AsyncSocketModeHandler(app, settings.slack_app_token)
-    logging.getLogger(__name__).info("⚡️ Bolt app started (Socket Mode)")
+    logging.getLogger(__name__).info(
+        "⚡️ Bolt app started (Socket Mode), workers=%d", settings.worker_concurrency
+    )
     await handler.start_async()
 
 

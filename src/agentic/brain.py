@@ -50,7 +50,10 @@ def _extract_json(text: str) -> dict[str, Any]:
 def parse_decision(text: str) -> BrainDecision:
     data = _extract_json(text)
     steps = [Step(agent=s["agent"], task=s["task"]) for s in data.get("steps") or []]
-    actions = [Action(type=a["type"], payload=a.get("payload") or {}) for a in data.get("actions") or []]
+    actions = [
+        Action(type=a.get("type") or a["tool"], payload=a.get("payload") or {})
+        for a in data.get("actions") or []
+    ]
     return BrainDecision(
         reply=data.get("reply"),
         need_clarification=bool(data.get("need_clarification")),
@@ -61,22 +64,32 @@ def parse_decision(text: str) -> BrainDecision:
     )
 
 
-def _format_history(history: list[dict]) -> str:
-    if not history:
+def _format_messages(messages: list[dict]) -> str:
+    if not messages:
         return ""
     lines = []
-    for h in history[-10:]:
-        agent = h.get("agent", "?")
-        inp = (h.get("input") or "").strip().replace("\n", " ")[:200]
-        out = (h.get("output") or "").strip().replace("\n", " ")[:200]
-        lines.append(f"[{agent}] in: {inp} | out: {out}")
+    for m in messages:
+        role = m.get("role", "?")
+        text = (m.get("text") or "").strip().replace("\n", " ")[:400]
+        lines.append(f"{role}: {text}")
     return "\n".join(lines)
 
 
-async def decide(user_message: str, history: list[dict] | None = None) -> BrainDecision:
+async def decide(
+    user_message: str,
+    *,
+    summary: str | None = None,
+    messages: list[dict] | None = None,
+) -> BrainDecision:
     system = load_prompt("brain")
-    hist = _format_history(history or [])
-    user = user_message if not hist else f"Recent thread:\n{hist}\n\nNew message:\n{user_message}"
+    parts: list[str] = []
+    if summary:
+        parts.append(f"## Tóm tắt hội thoại trước đó\n{summary.strip()}")
+    recent = _format_messages(messages or [])
+    if recent:
+        parts.append(f"## Tin nhắn gần đây\n{recent}")
+    parts.append(f"## Tin nhắn mới của user\n{user_message}")
+    user = "\n\n".join(parts)
     raw = await run_claude(system, user)
     try:
         return parse_decision(raw)

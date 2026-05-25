@@ -15,7 +15,7 @@ def _db():
     init_db()
 
 
-async def _fake_decide(message, history):
+async def _fake_decide(message, *, summary=None, messages=None):
     return BrainDecision(
         reply=None,
         steps=[Step(agent="ba", task="write user story for: " + message)],
@@ -39,7 +39,7 @@ async def test_dispatcher_runs_single_agent(monkeypatch):
 
 
 async def test_dispatcher_clarification(monkeypatch):
-    async def clarify(msg, hist):
+    async def clarify(msg, *, summary=None, messages=None):
         return BrainDecision(need_clarification=True, clarify_question="Which repo?")
 
     monkeypatch.setattr(dispatcher, "decide", clarify)

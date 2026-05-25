@@ -26,20 +26,37 @@ State (run logs, threads) is stored in SQLite.
 
 ```bash
 cd /Users/tyron/Projects/agentic
+make install           # creates .venv, installs editable + dev extras, copies .env.example -> .env
+# then edit .env: SLACK_BOT_TOKEN (xoxb-), SLACK_APP_TOKEN (xapp-), GITHUB_TOKEN (optional)
+```
+
+Manual equivalent:
+
+```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env
-# fill in SLACK_BOT_TOKEN (xoxb-), SLACK_APP_TOKEN (xapp-), GITHUB_TOKEN (optional)
 ```
 
-## Run
+## Run / debug / restart
 
-```bash
-python -m agentic.main
-# expect: "⚡️ Bolt app started (Socket Mode)"
-```
+Use the [Makefile](Makefile) for day-to-day:
 
-Then in Slack, DM the bot or `@mention` it in a channel.
+| target | behavior |
+| --- | --- |
+| `make run` | foreground, Ctrl-C to stop |
+| `make debug` | foreground with `LOG_LEVEL=DEBUG` |
+| `make start` | background; pid → `.agentic.pid`, stdout/stderr → `agentic.log` |
+| `make stop` | stop the background process |
+| `make restart` | `stop` + `start` |
+| `make status` | check whether the background process is running |
+| `make logs` | `tail -f agentic.log` |
+| `make test` | run pytest |
+| `make db-show` | last 20 rows of the `runs` table |
+| `make db-reset` | delete `agentic.db` (recreated on next start) |
+| `make clean` | drop pyc / pytest / build caches |
+
+Expect `⚡️ Bolt app started (Socket Mode)` on startup. Then in Slack, DM the bot or `@mention` it in a channel.
 
 ## Smoke tests
 
@@ -51,13 +68,15 @@ Then in Slack, DM the bot or `@mention` it in a channel.
 ## Inspect runs
 
 ```bash
+make db-show
+# equivalent:
 sqlite3 agentic.db "select id, agent, status, duration_ms, substr(input,1,60) from runs order by id desc limit 20;"
 ```
 
 ## Tests
 
 ```bash
-pytest
+make test    # or: pytest
 ```
 
 ## Layout
