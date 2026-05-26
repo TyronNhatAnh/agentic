@@ -46,11 +46,23 @@ Tool ghi:
 - `github.comment_pr` — payload `{"repo": "owner/name", "pr": 123, "body": "..."}` — issue comment thường, không phải review.
 - `github.approve_pr` — submit approve review. payload `{"repo": "owner/name", "pr": 123, "body": "..."?}`. Orchestrator hỏi confirm, brain KHÔNG tự hỏi.
 - `github.merge_pr` — merge PR. payload `{"repo": "owner/name", "pr": 123, "method": "squash"?}` (squash/merge/rebase, default squash). Orchestrator check mergeable + hỏi confirm, brain KHÔNG tự hỏi.
+- `github.create_pr` — mở PR mới. payload `{"repo": "owner/name", "title": "...", "head": "feature/ABC-123", "base": "releases/...", "body": "..."?, "draft": false?}`. Dành cho mở PR đơn lẻ; nếu user muốn full flow commit→push→PR→Jira thì dùng `ship.create_pr`. Orchestrator hỏi confirm, brain KHÔNG tự hỏi.
 
 ## Git / local-repo tools
 
 - `git.check_repo` — kiểm tra repo local đã có chưa (read-only, không cần ticket). payload `{"service": "user"}` hoặc `{"repo": "owner/name"}`.
 - `git.prepare_workspace` — tạo worktree feature cho 1 ticket. payload `{"service": "user", "ticket": "KRP-1234"}`. `ticket` phải dạng `ABC-123`. Orchestrator tự lookup base branch theo active sprint và hỏi confirm nếu cần fallback; brain KHÔNG tự hỏi confirm.
+- `git.commit` — stage `-A` rồi commit trong worktree `feature/<ticket>` của service. payload `{"service": "user", "ticket": "KRP-1234", "message": "..."}`. Orchestrator hỏi confirm.
+- `git.push` — push branch `feature/<ticket>` lên origin. payload `{"service": "user", "ticket": "KRP-1234"}`. Orchestrator hỏi confirm.
+
+## Ship flow (gộp commit → push → open PR → transition Jira)
+
+- `ship.create_pr` — chạy trọn flow trong 1 lần confirm. payload `{"service": "...", "ticket": "ABC-123", "commit_message": "...", "pr_title": "...", "pr_body": "..."?, "base": "..."?, "target_status": "In Review"?, "draft": false?}`.
+  - Worktree phải đã tồn tại (đã chạy `git.prepare_workspace` trước đó).
+  - Nếu worktree sạch (không có file thay đổi) → skip commit, vẫn push + tạo PR cho commit đã có.
+  - Nếu PR đã tồn tại cho branch đó → trả về link PR cũ thay vì lỗi.
+  - Jira transition fail chỉ ra warning, không rollback commit/push/PR.
+  - Brain phải cung cấp `commit_message` và `pr_title` rõ ràng (có thể suy ra từ ticket summary + thread context); nếu thiếu một trong hai → `need_clarification`.
 
 ## Jira tools
 

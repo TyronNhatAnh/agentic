@@ -92,6 +92,76 @@ async def approve_pr(
     )
 
 
+async def create_pr(
+    title: str,
+    head: str,
+    base: str,
+    body: str = "",
+    repo: str | None = None,
+    draft: bool = False,
+    confirmed: bool = False,
+) -> ToolResult:
+    repo = _repo(repo)
+    if not title.strip():
+        return ToolResult.failure("VALIDATION", "PR title không được rỗng.")
+    if not head.strip() or not base.strip():
+        return ToolResult.failure("VALIDATION", "head/base branch không được rỗng.")
+
+    if not confirmed:
+        draft_label = "draft " if draft else ""
+        question = (
+            f"Tạo {draft_label}PR trong `{repo}`: `{head}` → `{base}`\n"
+            f"Title: {title}\n"
+            f"(reply: ok / không)"
+        )
+        res = ToolResult.failure("NEEDS_CONFIRMATION", question)
+        res.data = {
+            "action_type": "github.create_pr",
+            "payload": {"repo": repo, "title": title, "head": head, "base": base,
+                        "body": body, "draft": draft, "confirmed": True},
+        }
+        return res
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{API}/repos/{repo}/pulls",
+            headers=_headers(),
+            json={"title": title, "head": head, "base": base,
+                  "body": body, "draft": draft},
+        )
+        if r.status_code == 422:
+            data = r.json() or {}
+            msg = data.get("message") or ""
+            errors_text = " ".join(
+                str(e.get("message", "")) for e in (data.get("errors") or [])
+            )
+            looks_existing = "already exists" in (msg + errors_text).lower()
+            if looks_existing:
+                owner = repo.split("/", 1)[0]
+                async with httpx.AsyncClient(timeout=30) as c2:
+                    r2 = await c2.get(
+                        f"{API}/repos/{repo}/pulls",
+                        headers=_headers(),
+                        params={"head": f"{owner}:{head}", "state": "open"},
+                    )
+                    r2.raise_for_status()
+                    existing = r2.json()
+                if existing:
+                    p = existing[0]
+                    return ToolResult.success(
+                        f"ℹ️ PR đã tồn tại: <{p['html_url']}|#{p['number']} {p['title']}>"
+                    )
+            detail = msg or errors_text or "tạo PR bị từ chối"
+            return ToolResult.failure(
+                "VALIDATION", f"GitHub từ chối tạo PR `{repo}`: {detail}"
+            )
+        r.raise_for_status()
+        d = r.json()
+    return ToolResult.success(
+        f"✅ Tạo PR #{d['number']} `{repo}`: <{d['html_url']}|{d['title']}>"
+    )
+
+
 _MERGE_METHODS = {"squash", "merge", "rebase"}
 _MERGE_OK_STATES = {"clean", "unstable"}  # 'unstable' = optional checks failing, allowed
 
@@ -322,6 +392,10 @@ async def get_pr_diff(pr: int, repo: str | None = None, max_chars: int = 20000) 
 
 ACTION_HANDLERS = {
     "github.create_issue":     lambda p: create_issue(p["title"], p["body"], p.get("repo")),
+    "github.create_pr":        lambda p: create_pr(p["title"], p["head"], p["base"],
+                                                   p.get("body", ""), p.get("repo"),
+                                                   bool(p.get("draft", False)),
+                                                   bool(p.get("confirmed", False))),
     "github.comment_pr":       lambda p: comment_pr(p["pr"], p["body"], p.get("repo")),
     "github.approve_pr":       lambda p: approve_pr(p["pr"], p.get("repo"), p.get("body", ""),
                                                     bool(p.get("confirmed", False))),

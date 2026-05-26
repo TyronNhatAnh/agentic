@@ -11,6 +11,7 @@ from .brain import Action, BrainDecision, decide
 from .config import settings
 from .integrations import git as git_int
 from .integrations import github, jira
+from .integrations import ship as ship_int
 from .integrations.result import ToolResult
 from .store import (
     add_message,
@@ -204,6 +205,7 @@ def _is_read_action(action_type: str) -> bool:
         "jira.comment_",
         "jira.transition_",
         "git.",
+        "ship.",
     )
     return not action_type.startswith(write_prefixes)
 
@@ -356,6 +358,8 @@ async def _invoke_integration(action: Action) -> ToolResult:
         return await jira.execute_action(action.type, action.payload)
     if action.type.startswith("git."):
         return await git_int.execute_action(action.type, action.payload)
+    if action.type.startswith("ship."):
+        return await ship_int.execute_action(action.type, action.payload)
     return ToolResult.failure("UNKNOWN_ACTION", f"unknown action `{action.type}`")
 
 

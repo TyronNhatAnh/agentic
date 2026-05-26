@@ -198,6 +198,104 @@ async def prepare_workspace(service: str, ticket: str,
     )
 
 
+async def commit_branch(service: str, ticket: str, message: str,
+                        confirmed: bool = False) -> ToolResult:
+    if not _TICKET_RE.match(ticket):
+        return ToolResult.failure(
+            "VALIDATION", f"Ticket key `{ticket}` không hợp lệ (cần dạng ABC-123)."
+        )
+    if not message.strip():
+        return ToolResult.failure("VALIDATION", "Commit message không được rỗng.")
+    svc = resolve_service(service)
+    if not svc:
+        return ToolResult.failure(
+            "NOT_FOUND", f"Không tìm thấy service `{service}` trong mapping."
+        )
+    worktree_path = Path(settings.worktree_dir) / svc["name"] / ticket
+    if not worktree_path.is_dir() or not Path(worktree_path, ".git").exists():
+        return ToolResult.failure(
+            "NOT_FOUND",
+            f"Chưa có worktree `{worktree_path}`. Chạy `git.prepare_workspace` trước.",
+        )
+
+    rc, status, err = await _run_git("status", "--porcelain", cwd=str(worktree_path))
+    if rc != 0:
+        return ToolResult.failure("GIT_STATUS", f"git status lỗi: {err[:200]}")
+    if not status.strip():
+        return ToolResult.failure(
+            "VALIDATION", f"Worktree `{worktree_path}` sạch, không có gì để commit."
+        )
+
+    if not confirmed:
+        lines = status.splitlines()
+        preview = "\n".join(lines[:20])
+        more = f"\n…(+{len(lines) - 20} files)" if len(lines) > 20 else ""
+        question = (
+            f"Commit trong worktree `{worktree_path}`?\n"
+            f"Message:\n> {message}\n"
+            f"Files:\n```\n{preview}{more}\n```\n"
+            f"(reply: ok / không)"
+        )
+        res = ToolResult.failure("NEEDS_CONFIRMATION", question)
+        res.data = {
+            "action_type": "git.commit",
+            "payload": {"service": service, "ticket": ticket,
+                        "message": message, "confirmed": True},
+        }
+        return res
+
+    rc, _, err = await _run_git("add", "-A", cwd=str(worktree_path))
+    if rc != 0:
+        return ToolResult.failure("GIT_ADD", f"git add lỗi: {err[:200]}")
+    rc, _, err = await _run_git("commit", "-m", message, cwd=str(worktree_path))
+    if rc != 0:
+        return ToolResult.failure("GIT_COMMIT", f"git commit lỗi: {err[:300]}")
+    rc, sha, _ = await _run_git("rev-parse", "HEAD", cwd=str(worktree_path))
+    sha_short = (sha or "?")[:7]
+    return ToolResult.success(
+        f"✅ Commit `{sha_short}` trong `{worktree_path}`."
+    )
+
+
+async def push_branch(service: str, ticket: str,
+                      confirmed: bool = False) -> ToolResult:
+    if not _TICKET_RE.match(ticket):
+        return ToolResult.failure(
+            "VALIDATION", f"Ticket key `{ticket}` không hợp lệ (cần dạng ABC-123)."
+        )
+    svc = resolve_service(service)
+    if not svc:
+        return ToolResult.failure(
+            "NOT_FOUND", f"Không tìm thấy service `{service}` trong mapping."
+        )
+    worktree_path = Path(settings.worktree_dir) / svc["name"] / ticket
+    if not worktree_path.is_dir() or not Path(worktree_path, ".git").exists():
+        return ToolResult.failure(
+            "NOT_FOUND",
+            f"Chưa có worktree `{worktree_path}`. Chạy `git.prepare_workspace` trước.",
+        )
+    feature_branch = f"feature/{ticket}"
+
+    if not confirmed:
+        question = (
+            f"Push branch `{feature_branch}` từ `{worktree_path}` lên origin? "
+            f"(reply: ok / không)"
+        )
+        res = ToolResult.failure("NEEDS_CONFIRMATION", question)
+        res.data = {
+            "action_type": "git.push",
+            "payload": {"service": service, "ticket": ticket, "confirmed": True},
+        }
+        return res
+
+    rc, _, err = await _run_git(
+        "push", "-u", "origin", feature_branch, cwd=str(worktree_path)
+    )
+    if rc != 0:
+        return ToolResult.failure("GIT_PUSH", f"git push lỗi: {err[:300]}")
+    return ToolResult.success(f"✅ Pushed `{feature_branch}` lên origin.")
+
+
 async def prepare_pr_review_workspace(repo: str, pr: int) -> ToolResult:
     """Create or update a detached local worktree at the PR head for review."""
     svc = resolve_service_by_github_repo(repo)
@@ -283,6 +381,13 @@ ACTION_HANDLERS = {
     ),
     "git.prepare_pr_review_workspace": lambda p: prepare_pr_review_workspace(
         p["repo"], int(p["pr"])
+    ),
+    "git.commit": lambda p: commit_branch(
+        p["service"], p["ticket"], p["message"],
+        bool(p.get("confirmed", False)),
+    ),
+    "git.push": lambda p: push_branch(
+        p["service"], p["ticket"], bool(p.get("confirmed", False)),
     ),
 }
 
