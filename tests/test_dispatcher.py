@@ -9,7 +9,7 @@ from agentic.agents import ba, dev, po, review  # noqa: E402
 from agentic import dispatcher  # noqa: E402
 from agentic.brain import Action, BrainDecision, Step  # noqa: E402
 from agentic.integrations.result import ToolResult  # noqa: E402
-from agentic.store import init_db, resolve_service_by_github_repo  # noqa: E402
+from agentic.store import connect, init_db, resolve_service_by_github_repo  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -235,6 +235,19 @@ async def test_dispatcher_checks_local_repo_status_without_jira_ticket(monkeypat
 
 
 def test_seeded_service_resolves_by_github_repo():
+    with connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO service_repos(name, repo_path, github_repo, "
+            "base_branch_template, jira_board_id, aliases) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "ggx-kr-user-service",
+                "/tmp/ggx-kr-user-service",
+                "gogovan/ggx-kr-user-service",
+                "",
+                0,
+                '["user-service"]',
+            ),
+        )
     svc = resolve_service_by_github_repo("gogovan/ggx-kr-user-service")
 
     assert svc is not None

@@ -24,6 +24,7 @@ Viết tóm tắt ngắn (~150 từ, tiếng Việt) gồm các điểm còn li�
 Chỉ trả văn bản thuần, không markdown fence, không tiêu đề."""
 
 _busy: set[str] = set()
+_scheduled: set[asyncio.Task] = set()
 
 
 def _exceeds_threshold(thread_ts: str) -> bool:
@@ -72,4 +73,8 @@ def maybe_schedule(thread_ts: str | None) -> None:
         return
     if not _exceeds_threshold(thread_ts):
         return
-    asyncio.create_task(summarize_thread(thread_ts), name=f"summarize-{thread_ts}")
+    task = asyncio.create_task(
+        summarize_thread(thread_ts), name=f"summarize-{thread_ts}"
+    )
+    _scheduled.add(task)
+    task.add_done_callback(_scheduled.discard)

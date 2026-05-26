@@ -26,12 +26,9 @@ class Settings(BaseSettings):
     jira_default_project: str = Field(default="", alias="JIRA_DEFAULT_PROJECT")
     jira_board_id: int = Field(default=0, alias="JIRA_BOARD_ID")
 
-    workspace_dir: str = Field(
-        default="/Users/tyron/Documents/work/Gogox", alias="WORKSPACE_DIR"
-    )
-    worktree_dir: str = Field(
-        default="/Users/tyron/Documents/work/Gogox/.worktrees", alias="WORKTREE_DIR"
-    )
+    workspace_dir: str = Field(default="", alias="WORKSPACE_DIR")
+    worktree_dir: str = Field(default="", alias="WORKTREE_DIR")
+    services_seed_path: str = Field(default="", alias="AGENTIC_SERVICES_JSON")
     base_branch_template: str = Field(
         default="releases/DAPro-2.{sprint}", alias="BASE_BRANCH_TEMPLATE"
     )

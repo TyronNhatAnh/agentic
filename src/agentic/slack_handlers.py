@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 
 from slack_bolt.async_app import AsyncApp
 
@@ -11,8 +12,9 @@ log = logging.getLogger(__name__)
 _MENTION_RE = re.compile(r"<@[A-Z0-9]+>\s*")
 _BUSY_MSG = "⏳ Đang chạy job trước rồi, đợi xíu nha."
 _SLACK_CHUNK_LEN = 3500
+_CHANNEL_CACHE_TTL_S = 30 * 60  # 30 minutes — picks up renames within half an hour
 
-_channel_name_cache: dict[str, str] = {}
+_channel_name_cache: dict[str, tuple[str, float]] = {}
 
 
 def _clean(text: str) -> str:
@@ -84,18 +86,59 @@ def _chunks(text: str, limit: int = _SLACK_CHUNK_LEN) -> list[str]:
     return chunks
 
 
+async def _fetch_thread_history(
+    client, channel: str, thread_ts: str, current_ts: str, limit: int = 20
+) -> list[dict]:
+    """Pull the last ~20 messages in this thread from Slack and normalize them
+    for the brain. Filters out the current mention (and anything posted after it).
+    Bot-posted messages map to role="assistant", everything else to "user".
+
+    Slack is the source of truth here because non-mention user messages (other
+    teammates pasting links, context, etc.) never reach the DB."""
+    try:
+        resp = await client.conversations_replies(
+            channel=channel, ts=thread_ts, limit=limit
+        )
+    except Exception as e:
+        log.warning("conversations_replies failed for %s: %s", thread_ts, e)
+        return []
+    try:
+        current_ts_f = float(current_ts)
+    except (TypeError, ValueError):
+        current_ts_f = None
+    history: list[dict] = []
+    for m in resp.get("messages") or []:
+        msg_ts = m.get("ts")
+        if msg_ts == current_ts:
+            continue
+        if current_ts_f is not None:
+            try:
+                if float(msg_ts) >= current_ts_f:
+                    continue
+            except (TypeError, ValueError):
+                pass
+        text = _clean(m.get("text") or "")
+        if not text:
+            continue
+        role = "assistant" if m.get("bot_id") else "user"
+        history.append({"role": role, "text": text})
+    return history[-10:]
+
+
 async def _channel_name(client, channel_id: str) -> str | None:
     cached = _channel_name_cache.get(channel_id)
-    if cached is not None:
-        return cached
+    now = time.time()
+    if cached is not None and now - cached[1] < _CHANNEL_CACHE_TTL_S:
+        return cached[0]
     try:
         resp = await client.conversations_info(channel=channel_id)
         name = (resp.get("channel") or {}).get("name") or ""
     except Exception as e:
         log.warning("conversations_info failed for %s: %s", channel_id, e)
-        return None
-    _channel_name_cache[channel_id] = name.lower()
-    return _channel_name_cache[channel_id]
+        # Reuse stale cache on transient failure rather than denying access.
+        return cached[0] if cached else None
+    _channel_name_cache[channel_id] = (name.lower(), now)
+    return _channel_name_cache[channel_id][0]
 
 
 def register(app: AsyncApp, runner: JobRunner) -> None:
@@ -117,6 +160,7 @@ def register(app: AsyncApp, runner: JobRunner) -> None:
         raw = event.get("text") or ""
         text = _clean(raw)
         thread_ts = event.get("thread_ts") or event["ts"]
+        current_ts = event["ts"]
         user_id = event.get("user")
 
         if not text:
@@ -126,6 +170,10 @@ def register(app: AsyncApp, runner: JobRunner) -> None:
                 text="Bạn cần gì? Mention mình kèm nội dung nha.",
             )
             return
+
+        thread_history = await _fetch_thread_history(
+            client, channel, thread_ts, current_ts
+        )
 
         placeholder = await client.chat_postMessage(
             channel=channel,
@@ -161,6 +209,7 @@ def register(app: AsyncApp, runner: JobRunner) -> None:
             reply=reply,
             progress=progress,
             progress_messages=_progress_messages_for(text),
+            thread_history=thread_history,
         )
         accepted = await runner.submit(job)
         if not accepted:

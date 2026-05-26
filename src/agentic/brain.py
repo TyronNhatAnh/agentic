@@ -103,5 +103,13 @@ async def decide(
     try:
         return parse_decision(raw)
     except Exception as e:
-        log.warning("brain parse failed: %s; falling back to raw reply", e)
-        return BrainDecision(reply=raw, raw=raw)
+        log.error(
+            "brain JSON parse failed: %s; raw_head=%r",
+            e,
+            raw[:500],
+        )
+        fallback = (
+            "⚠️ Brain trả response không phải JSON hợp lệ; bot không chạy step/action nào.\n"
+            "Raw model output:\n" + raw
+        )
+        return BrainDecision(reply=fallback, raw=raw)

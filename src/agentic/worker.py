@@ -18,6 +18,7 @@ class Job:
     reply: ReplyFn
     progress: ReplyFn | None = None
     progress_messages: list[str] = field(default_factory=list)
+    thread_history: list[dict] = field(default_factory=list)
 
 
 class JobRunner:
@@ -57,6 +58,7 @@ class JobRunner:
                     thread_ts=job.thread_ts,
                     channel=job.channel,
                     user_id=job.user_id,
+                    thread_history=job.thread_history,
                 )
             except Exception as e:
                 log.exception("worker %d handler error", idx)

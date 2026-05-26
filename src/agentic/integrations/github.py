@@ -56,6 +56,138 @@ async def comment_pr(pr: int, body: str, repo: str | None = None) -> str:
         return f"✅ Đã comment vào PR #{pr} `{repo}`: <{r.json()['html_url']}|xem comment>"
 
 
+async def approve_pr(
+    pr: int, repo: str | None = None, body: str = "", confirmed: bool = False
+) -> ToolResult:
+    repo = _repo(repo)
+    if not confirmed:
+        question = f"Ông xác nhận **approve review** PR #{pr} `{repo}`?"
+        if body:
+            question += f"\n> {body}"
+        res = ToolResult.failure("NEEDS_CONFIRMATION", question)
+        res.data = {
+            "action_type": "github.approve_pr",
+            "payload": {"repo": repo, "pr": pr, "body": body, "confirmed": True},
+        }
+        return res
+    review_body: dict = {"event": "APPROVE"}
+    if body:
+        review_body["body"] = body
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{API}/repos/{repo}/pulls/{pr}/reviews",
+            headers=_headers(),
+            json=review_body,
+        )
+        if r.status_code == 422:
+            # Most common: author trying to approve own PR, or PR is closed.
+            detail = (r.json() or {}).get("message") or "không approve được"
+            return ToolResult.failure(
+                "VALIDATION", f"GitHub từ chối approve PR #{pr} `{repo}`: {detail}"
+            )
+        r.raise_for_status()
+        d = r.json()
+    return ToolResult.success(
+        f"✅ Đã approve review PR #{pr} `{repo}`: <{d.get('html_url') or ''}|xem review>"
+    )
+
+
+_MERGE_METHODS = {"squash", "merge", "rebase"}
+_MERGE_OK_STATES = {"clean", "unstable"}  # 'unstable' = optional checks failing, allowed
+
+
+async def merge_pr(
+    pr: int,
+    repo: str | None = None,
+    method: str = "squash",
+    commit_title: str = "",
+    commit_message: str = "",
+    confirmed: bool = False,
+) -> ToolResult:
+    repo = _repo(repo)
+    if method not in _MERGE_METHODS:
+        return ToolResult.failure(
+            "VALIDATION", f"merge method `{method}` không hợp lệ (squash/merge/rebase)"
+        )
+
+    # Always re-check mergeability — even on resume, state may have changed.
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{API}/repos/{repo}/pulls/{pr}", headers=_headers())
+        r.raise_for_status()
+        p = r.json()
+
+    if p.get("merged"):
+        return ToolResult.failure(
+            "VALIDATION", f"PR #{pr} `{repo}` đã merge rồi (sha {p.get('merge_commit_sha')})."
+        )
+    if p.get("state") != "open":
+        return ToolResult.failure(
+            "VALIDATION", f"PR #{pr} `{repo}` đang ở state `{p.get('state')}`, không merge được."
+        )
+    if p.get("draft"):
+        return ToolResult.failure(
+            "VALIDATION", f"PR #{pr} `{repo}` đang là draft."
+        )
+
+    state = p.get("mergeable_state") or "unknown"
+    if state not in _MERGE_OK_STATES:
+        reasons = {
+            "dirty": "có conflict với base branch",
+            "blocked": "bị block (thiếu required approvals hoặc required checks fail)",
+            "behind": "branch đang behind base, cần update branch",
+            "draft": "PR đang draft",
+            "unknown": "GitHub chưa tính xong mergeable state, thử lại sau xíu",
+            "has_hooks": "có hook chặn (cần admin merge)",
+        }
+        why = reasons.get(state, f"mergeable_state = `{state}`")
+        return ToolResult.failure(
+            "VALIDATION", f"⛔ PR #{pr} `{repo}` chưa merge được: {why}."
+        )
+
+    if not confirmed:
+        head = p.get("head", {}).get("ref", "?")
+        base = p.get("base", {}).get("ref", "?")
+        question = (
+            f"Ông xác nhận **merge** PR #{pr} `{repo}` "
+            f"(`{head}` → `{base}`, method `{method}`)?"
+        )
+        res = ToolResult.failure("NEEDS_CONFIRMATION", question)
+        res.data = {
+            "action_type": "github.merge_pr",
+            "payload": {
+                "repo": repo,
+                "pr": pr,
+                "method": method,
+                "commit_title": commit_title,
+                "commit_message": commit_message,
+                "confirmed": True,
+            },
+        }
+        return res
+
+    merge_body: dict = {"merge_method": method}
+    if commit_title:
+        merge_body["commit_title"] = commit_title
+    if commit_message:
+        merge_body["commit_message"] = commit_message
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.put(
+            f"{API}/repos/{repo}/pulls/{pr}/merge",
+            headers=_headers(),
+            json=merge_body,
+        )
+        if r.status_code in (405, 409):
+            detail = (r.json() or {}).get("message") or "merge bị từ chối"
+            return ToolResult.failure(
+                "VALIDATION", f"GitHub từ chối merge PR #{pr} `{repo}`: {detail}"
+            )
+        r.raise_for_status()
+        d = r.json()
+    return ToolResult.success(
+        f"✅ Đã merge PR #{pr} `{repo}` ({method}). SHA `{d.get('sha', '?')[:7]}`."
+    )
+
+
 # ---------- read tools ----------
 
 async def list_my_prs(state: str = "open") -> str:
@@ -191,6 +323,13 @@ async def get_pr_diff(pr: int, repo: str | None = None, max_chars: int = 20000) 
 ACTION_HANDLERS = {
     "github.create_issue":     lambda p: create_issue(p["title"], p["body"], p.get("repo")),
     "github.comment_pr":       lambda p: comment_pr(p["pr"], p["body"], p.get("repo")),
+    "github.approve_pr":       lambda p: approve_pr(p["pr"], p.get("repo"), p.get("body", ""),
+                                                    bool(p.get("confirmed", False))),
+    "github.merge_pr":         lambda p: merge_pr(p["pr"], p.get("repo"),
+                                                  p.get("method", "squash"),
+                                                  p.get("commit_title", ""),
+                                                  p.get("commit_message", ""),
+                                                  bool(p.get("confirmed", False))),
     "github.list_my_prs":      lambda p: list_my_prs(p.get("state", "open")),
     "github.list_prs":         lambda p: list_prs(p["repo"], p.get("state", "open"), p.get("author")),
     "github.list_issues":      lambda p: list_issues(p["repo"], p.get("state", "open"),
@@ -208,7 +347,9 @@ async def execute_action(action_type: str, payload: dict) -> ToolResult:
     if not handler:
         return ToolResult.failure("UNKNOWN_ACTION", f"unknown action `{action_type}`")
     try:
-        text = await handler(payload)
-        return ToolResult.success(text)
+        result = await handler(payload)
+        if isinstance(result, ToolResult):
+            return result
+        return ToolResult.success(result)
     except Exception as e:
         return classify_exception(e, service="GitHub")

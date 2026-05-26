@@ -26,23 +26,27 @@ from .store import (
 )
 
 _AFFIRMATIVE = {
-    "ok", "okay", "oke", "okie", "yes", "y", "yeah", "yep",
-    "ụ", "u", "uổ", "được", "đồng ý",
+    "ok", "okay", "oke", "okie", "yes", "yeah", "yep",
+    "ừ", "ừm", "uhm", "được", "đồng ý",
     "tiếp", "tiếp tục", "làm đi", "chốt", "ok b",
-    "gửụg", "proceed", "go",
+    "proceed", "go", "go ahead", "confirm",
 }
 _NEGATIVE = {
-    "no", "n", "không", "khong", "hủy", "huy", "stop", "cancel", "thôi",
-    "thoi", "khỏi", "khoi",
+    "no", "không", "khong", "hủy", "huy", "stop", "cancel", "thôi",
+    "thoi", "khỏi", "khoi", "abort",
 }
+
+
+def _normalize_reply(text: str) -> str:
+    return text.strip().lower().rstrip(".!?。 ")
 
 
 def _is_affirmative(text: str) -> bool:
-    return text.strip().lower().rstrip(".!") in _AFFIRMATIVE
+    return _normalize_reply(text) in _AFFIRMATIVE
 
 
 def _is_negative(text: str) -> bool:
-    return text.strip().lower().rstrip(".!") in _NEGATIVE
+    return _normalize_reply(text) in _NEGATIVE
 from .summarizer import maybe_schedule as maybe_schedule_summary
 
 log = logging.getLogger(__name__)
@@ -112,9 +116,6 @@ def _repo_from_text_or_history(text: str, messages: list[dict]) -> str | None:
         match = _REPO_SLUG_RE.search(item)
         if match:
             return match.group(1)
-    lowered = "\n".join(haystacks).lower()
-    if any(alias in lowered for alias in ("user service", "user-service", "ggx-kr-user-service")):
-        return "gogovan/ggx-kr-user-service"
     return settings.github_default_repo or None
 
 # Reply gửi lên Slack nên rất ngắn: chỉ kết luận + link/keys + next step.
@@ -197,6 +198,8 @@ def _is_read_action(action_type: str) -> bool:
     write_prefixes = (
         "github.create_",
         "github.comment_",
+        "github.approve_",
+        "github.merge_",
         "jira.create_",
         "jira.comment_",
         "jira.transition_",
@@ -357,7 +360,13 @@ async def _invoke_integration(action: Action) -> ToolResult:
 
 
 async def _run_action(action: Action) -> ToolResult:
-    """Run an action with deterministic retry. Returns the final ToolResult."""
+    """Run an action with deterministic retry. Returns the final ToolResult.
+
+    Write actions (create/comment/transition/git.*) are NEVER retried even on
+    retryable errors — a timed-out POST may have succeeded server-side, and
+    retrying would duplicate the Jira ticket / PR comment / branch.
+    """
+    can_retry = _is_read_action(action.type)
     last: ToolResult | None = None
     for attempt in range(_MAX_RETRIES + 1):
         result = await _invoke_integration(action)
@@ -370,11 +379,24 @@ async def _run_action(action: Action) -> ToolResult:
             "action %s failed (attempt %d): %s — %s",
             action.type, attempt + 1, result.error_code, result.user_message,
         )
-        if not result.retryable or attempt >= _MAX_RETRIES:
+        if not can_retry or not result.retryable or attempt >= _MAX_RETRIES:
             break
         await asyncio.sleep(_RETRY_BACKOFF_S[min(attempt, len(_RETRY_BACKOFF_S) - 1)])
     assert last is not None
     return last
+
+
+_USER_FRIENDLY_ERROR_MESSAGES = {
+    "UNKNOWN_ACTION": (
+        "Mình chưa hỗ trợ thao tác này, hoặc bot đang chạy 2 instance lệch version. "
+        "Ông thử restart bot (`make stop && make start`) rồi báo lại nha."
+    ),
+    "UNKNOWN": "Có lỗi không xác định khi gọi tool. Ông thử lại sau xíu nha.",
+    "SERVER": "Service phía bên kia đang lỗi (5xx). Thử lại sau xíu.",
+    "NETWORK": "Không kết nối được service. Có thể mạng đang lag.",
+    "TIMEOUT": "Tool chạy quá lâu, đã timeout. Thử lại nha.",
+    "RATE_LIMIT": "Bị rate-limit, đợi tí rồi thử lại.",
+}
 
 
 def _format_action_result(result: ToolResult) -> tuple[str, str, str | None]:
@@ -382,7 +404,18 @@ def _format_action_result(result: ToolResult) -> tuple[str, str, str | None]:
         return result.display(), "ok", None
     if result.error_code == "NEEDS_CONFIRMATION":
         return f"❓ {result.user_message}", "pending", "NEEDS_CONFIRMATION"
-    icon = "⚠️" if result.error_code in {"AUTH", "CONFIG", "VALIDATION", "NOT_FOUND"} else "❌"
+    soft_codes = {"AUTH", "CONFIG", "VALIDATION", "NOT_FOUND"}
+    icon = "⚠️" if result.error_code in soft_codes else "❌"
+    # Internal/transport codes have unhelpful raw messages — substitute a friendly
+    # explanation and log the raw detail for debugging. AUTH/CONFIG/VALIDATION/
+    # NOT_FOUND messages from tool authors are already user-facing.
+    if result.error_code in _USER_FRIENDLY_ERROR_MESSAGES:
+        friendly = _USER_FRIENDLY_ERROR_MESSAGES[result.error_code]
+        log.warning(
+            "tool error rendered as friendly message: code=%s raw=%r",
+            result.error_code, result.user_message,
+        )
+        return f"{icon} {friendly}", "error", result.error_code
     return f"{icon} {result.user_message}", "error", result.error_code
 
 
@@ -451,6 +484,7 @@ async def handle_message(
     thread_ts: str | None,
     channel: str | None,
     user_id: str | None,
+    thread_history: list[dict] | None = None,
 ) -> str:
     text, input_truncated = _truncate(text, settings.max_input_chars, label="input")
     summary: str | None = None
@@ -460,7 +494,9 @@ async def handle_message(
         touch_thread(thread_ts, channel)
         thread_row = get_thread(thread_ts)
         summary = (thread_row or {}).get("summary")
-        prior_messages = recent_messages(thread_ts, limit=10)
+        # Slack thread history (when available) covers non-mention user messages
+        # that the DB never sees; fall back to DB if Slack fetch returned nothing.
+        prior_messages = thread_history or recent_messages(thread_ts, limit=10)
         pending = get_pending_confirmation(thread_ts)
         add_message(thread_ts, "user", text)
     last_agent: str | None = None

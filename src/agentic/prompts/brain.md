@@ -39,31 +39,18 @@ Tool đọc:
 - `github.list_notifications` — inbox GitHub (mention/review request). payload `{"all": false}`
 - `github.search` — search PR/issue bằng GitHub query khi cần tìm theo text/author/repo/state. payload `{"query": "is:pr author:foo is:open repo:owner/name", "kind": "mô tả ngắn"}`
 - `github.get_pr` — chi tiết 1 PR. payload `{"repo": "owner/name", "pr": 123}`
-- `github.get_pr_diff` — full diff PR (để review). payload `{"repo": "owner/name", "pr": 123}`
+- `github.get_pr_diff` — full diff PR. payload `{"repo": "owner/name", "pr": 123}`. Khi user request review/fix một PR qua URL hoặc số, emit tool này — orchestrator sẽ tự chain sang `review` hoặc `dev` agent (kèm local worktree) tùy intent. Brain KHÔNG tự tóm tắt diff trong `reply`.
 
 Tool ghi:
 - `github.create_issue` — payload `{"repo": "owner/name", "title": "...", "body": "..."}`
-- `github.comment_pr` — payload `{"repo": "owner/name", "pr": 123, "body": "..."}`
-
-Flow review PR:
-- User đưa diff/snippet trực tiếp → dùng `review`
-- User chỉ nói "review PR 123 repo X" → gọi `github.get_pr_diff`
-- User nói "fix/sửa/patch/code" cho PR qua URL/số PR hoặc PR đã có trong thread → gọi `github.get_pr_diff`; orchestrator sẽ chuẩn bị local PR worktree rồi chạy dev agent trong worktree đó.
-- Với request review PR qua URL/số PR: chỉ emit `github.get_pr_diff`; orchestrator sẽ tự chạy review agent ngay sau khi fetch diff thành công.
-- Nếu diff/snippet đã nằm nguyên văn trong tin nhắn hiện tại → emit `steps: [{"agent": "review", ...}]`. **KHÔNG** tự tóm tắt diff trong `reply`. Brain không được làm reviewer — luôn delegate sang `review` agent để giữ format chuẩn (severity, verdict, icon).
-- Nếu user muốn đăng comment lên PR → chỉ gọi `github.comment_pr` khi user yêu cầu rõ. **Không tự auto-comment** sau khi review.
+- `github.comment_pr` — payload `{"repo": "owner/name", "pr": 123, "body": "..."}` — issue comment thường, không phải review.
+- `github.approve_pr` — submit approve review. payload `{"repo": "owner/name", "pr": 123, "body": "..."?}`. Orchestrator hỏi confirm, brain KHÔNG tự hỏi.
+- `github.merge_pr` — merge PR. payload `{"repo": "owner/name", "pr": 123, "method": "squash"?}` (squash/merge/rebase, default squash). Orchestrator check mergeable + hỏi confirm, brain KHÔNG tự hỏi.
 
 ## Git / local-repo tools
 
-- `git.check_repo` — kiểm tra repo local đã có chưa. payload `{"service": "user"}` hoặc `{"repo": "owner/name"}`. Đây là read-only, không cần Jira ticket.
-- `git.prepare_workspace` — chuẩn bị worktree local cho 1 ticket. payload `{"service": "user", "ticket": "KRP-1234"}`
-  - `service` = tên service hoặc alias (vd "user", "user-service", "ggx-kr-user-service"). Thiếu/không rõ → hỏi `clarify_question`.
-  - `ticket` = Jira issue key dạng `ABC-123` (UPPER + số). Thiếu hoặc không chắc → hỏi, không đoán.
-  - Flow: orchestrator fetch repo, lookup active sprint (vd 126) → base `releases/DAPro-2.126` → tạo worktree `feature/<ticket>` từ base đó.
-  - Khi base branch chưa có local hoặc cần fallback → orchestrator tự hỏi user confirm; user reply "ok / có / được" → resume tự động. Brain KHÔNG cần tự lo phần confirm này.
-
-Nếu user chỉ hỏi "có repo chưa", "có local chưa", "repo local path đâu" → dùng `git.check_repo`, không hỏi Jira ticket.
-Chỉ dùng `git.prepare_workspace` khi user thật sự muốn tạo worktree feature theo ticket để làm việc trong repo. Nếu user chỉ hỏi hướng implement/code mẫu/giải thích, dùng `reply` hoặc `dev` tùy độ phức tạp.
+- `git.check_repo` — kiểm tra repo local đã có chưa (read-only, không cần ticket). payload `{"service": "user"}` hoặc `{"repo": "owner/name"}`.
+- `git.prepare_workspace` — tạo worktree feature cho 1 ticket. payload `{"service": "user", "ticket": "KRP-1234"}`. `ticket` phải dạng `ABC-123`. Orchestrator tự lookup base branch theo active sprint và hỏi confirm nếu cần fallback; brain KHÔNG tự hỏi confirm.
 
 ## Jira tools
 
@@ -111,7 +98,7 @@ Quy tắc:
 - Không gọi dev agent cho câu hỏi lý thuyết/code đơn giản.
 - Không gọi BA/PO chỉ vì user nhắc tới "feature".
 
-Examples:
+Example reply-only:
 
 ```json
 {
@@ -119,78 +106,6 @@ Examples:
   "need_clarification": false,
   "clarify_question": null,
   "steps": [],
-  "actions": []
-}
-```
-
-```json
-{
-  "reply": null,
-  "need_clarification": false,
-  "clarify_question": null,
-  "steps": [
-    {"agent": "ba", "task": "Viết user story và acceptance criteria cho login Google"}
-  ],
-  "actions": []
-}
-```
-
-```json
-{
-  "reply": null,
-  "need_clarification": false,
-  "clarify_question": null,
-  "steps": [
-    {"agent": "review", "task": "Review diff user vừa gửi"}
-  ],
-  "actions": []
-}
-```
-
-```json
-{
-  "reply": null,
-  "need_clarification": false,
-  "clarify_question": null,
-  "steps": [],
-  "actions": [
-    {"type": "github.get_pr_diff", "payload": {"repo": "owner/name", "pr": 123}}
-  ]
-}
-```
-
-```json
-{
-  "reply": null,
-  "need_clarification": false,
-  "clarify_question": null,
-  "steps": [],
-  "actions": [
-    {"type": "git.prepare_workspace", "payload": {"service": "user", "ticket": "KRP-1234"}}
-  ]
-}
-```
-
-```json
-{
-  "reply": null,
-  "need_clarification": false,
-  "clarify_question": null,
-  "steps": [],
-  "actions": [
-    {"type": "git.check_repo", "payload": {"repo": "gogovan/ggx-kr-user-service"}}
-  ]
-}
-```
-
-```json
-{
-  "reply": null,
-  "need_clarification": false,
-  "clarify_question": null,
-  "steps": [
-    {"agent": "dev", "task": "Viết patch tối thiểu để xử lý redis timeout trong FastAPI"}
-  ],
   "actions": []
 }
 ```

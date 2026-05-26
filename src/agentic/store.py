@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 import time
@@ -5,6 +6,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .config import settings
+
+_PRAGMAS_APPLIED = False
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -64,16 +67,41 @@ CREATE TABLE IF NOT EXISTS pending_confirmations (
 );
 """
 
-_SERVICE_SEEDS = [
-    {
-        "name": "ggx-kr-user-service",
-        "repo_path": "/Users/tyron/Documents/work/Gogox/ggx-kr-user-service",
-        "github_repo": "gogovan/ggx-kr-user-service",
-        "base_branch_template": "",
-        "jira_board_id": 0,
-        "aliases": '["user", "user-service", "user services", "user service"]',
-    },
-]
+def _load_service_seeds() -> list[dict]:
+    """Service seeds come from an external JSON file pointed to by
+    AGENTIC_SERVICES_JSON. Empty by default — keeps the repo portable."""
+    path = (settings.services_seed_path or "").strip()
+    if not path:
+        return []
+    p = Path(path)
+    if not p.is_file():
+        return []
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    seeds: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict) or not item.get("name") or not item.get("repo_path"):
+            continue
+        aliases = item.get("aliases")
+        if isinstance(aliases, list):
+            aliases_json = json.dumps(aliases)
+        elif isinstance(aliases, str):
+            aliases_json = aliases
+        else:
+            aliases_json = "[]"
+        seeds.append({
+            "name": item["name"],
+            "repo_path": item["repo_path"],
+            "github_repo": item.get("github_repo") or "",
+            "base_branch_template": item.get("base_branch_template") or "",
+            "jira_board_id": int(item.get("jira_board_id") or 0),
+            "aliases": aliases_json,
+        })
+    return seeds
 
 _THREAD_ADDED_COLUMNS = {
     "summary": "TEXT",
@@ -94,10 +122,12 @@ def init_db() -> None:
         for col, decl in _THREAD_ADDED_COLUMNS.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE threads ADD COLUMN {col} {decl}")
-        # Seed service_repos if empty
+        seeds = _load_service_seeds()
+        if not seeds:
+            return
         row = conn.execute("SELECT COUNT(*) AS n FROM service_repos").fetchone()
         if row["n"] == 0:
-            for s in _SERVICE_SEEDS:
+            for s in seeds:
                 conn.execute(
                     """
                     INSERT INTO service_repos(name, repo_path, github_repo,
@@ -108,7 +138,7 @@ def init_db() -> None:
                      s["base_branch_template"], s["jira_board_id"], s["aliases"]),
                 )
         else:
-            for s in _SERVICE_SEEDS:
+            for s in seeds:
                 if not s["github_repo"]:
                     continue
                 conn.execute(
@@ -123,13 +153,29 @@ def init_db() -> None:
 
 @contextmanager
 def connect():
-    conn = sqlite3.connect(settings.agentic_db)
+    global _PRAGMAS_APPLIED
+    conn = sqlite3.connect(settings.agentic_db, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    if not _PRAGMAS_APPLIED:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            _PRAGMAS_APPLIED = True
+        except sqlite3.DatabaseError:
+            pass
+    else:
+        conn.execute("PRAGMA busy_timeout=5000")
     try:
         yield conn
         conn.commit()
     finally:
         conn.close()
+
+
+async def run_db(func, *args, **kwargs):
+    """Run a blocking store helper off the event loop."""
+    return await asyncio.to_thread(func, *args, **kwargs)
 
 
 def log_run(
@@ -286,6 +332,9 @@ def save_pending_confirmation(thread_ts: str, action_type: str,
         )
 
 
+PENDING_CONFIRMATION_TTL_S = 30 * 60  # 30 minutes
+
+
 def get_pending_confirmation(thread_ts: str) -> dict | None:
     with connect() as conn:
         row = conn.execute(
@@ -294,6 +343,10 @@ def get_pending_confirmation(thread_ts: str) -> dict | None:
     if not row:
         return None
     d = dict(row)
+    age = time.time() - float(d.get("created_at") or 0)
+    if age > PENDING_CONFIRMATION_TTL_S:
+        clear_pending_confirmation(thread_ts)
+        return None
     try:
         d["payload"] = json.loads(d["payload"])
     except json.JSONDecodeError:
