@@ -9,16 +9,82 @@ from .worker import Job, JobRunner
 
 log = logging.getLogger(__name__)
 
-_MENTION_RE = re.compile(r"<@[A-Z0-9]+>\s*")
+_MENTION_RE = re.compile(r"<@([A-Z0-9]+)>\s*")
 _BUSY_MSG = "⏳ Đang chạy job trước rồi, đợi xíu nha."
 _SLACK_CHUNK_LEN = 3500
 _CHANNEL_CACHE_TTL_S = 30 * 60  # 30 minutes — picks up renames within half an hour
+_USER_CACHE_TTL_S = 30 * 60
 
 _channel_name_cache: dict[str, tuple[str, float]] = {}
+# uid -> (display_name, email, fetched_at)
+_user_info_cache: dict[str, tuple[str | None, str | None, float]] = {}
+_bot_user_id_cache: dict[str, str | None] = {}
 
 
-def _clean(text: str) -> str:
-    return _MENTION_RE.sub("", text or "").strip()
+async def _bot_user_id(client) -> str | None:
+    """Cached `auth.test` — needed to distinguish the bot's own mention from
+    mentions of other users so we only strip ours and keep theirs as context."""
+    if "id" in _bot_user_id_cache:
+        return _bot_user_id_cache["id"]
+    try:
+        resp = await client.auth_test()
+        uid = resp.get("user_id") or None
+    except Exception as e:
+        log.warning("auth_test failed: %s", e)
+        return None
+    _bot_user_id_cache["id"] = uid
+    return uid
+
+
+async def _user_label(client, user_id: str) -> str | None:
+    cached = _user_info_cache.get(user_id)
+    now = time.time()
+    if cached is not None and now - cached[2] < _USER_CACHE_TTL_S:
+        name, email = cached[0], cached[1]
+    else:
+        name: str | None = None
+        email: str | None = None
+        try:
+            resp = await client.users_info(user=user_id)
+            user = resp.get("user") or {}
+            profile = user.get("profile") or {}
+            name = (
+                profile.get("real_name")
+                or profile.get("display_name")
+                or user.get("real_name")
+                or user.get("name")
+            )
+            email = profile.get("email")
+        except Exception as e:
+            log.warning("users_info failed for %s: %s", user_id, e)
+            if cached is not None:
+                name, email = cached[0], cached[1]  # reuse stale on transient failure
+        _user_info_cache[user_id] = (name, email, now)
+    if not name:
+        return None
+    return f"@{name} ({email})" if email else f"@{name}"
+
+
+async def _resolve_mentions(client, text: str, bot_user_id: str | None) -> str:
+    """Strip the bot's own mention; replace other `<@USERID>` with
+    `@DisplayName (email)` so the brain has actual identity context to work
+    with (search Jira by email, look up GitHub by name, etc.)."""
+    if not text:
+        return ""
+    parts: list[str] = []
+    last = 0
+    for m in _MENTION_RE.finditer(text):
+        uid = m.group(1)
+        parts.append(text[last : m.start()])
+        if bot_user_id and uid == bot_user_id:
+            replacement = ""
+        else:
+            label = await _user_label(client, uid)
+            replacement = f"{label} " if label else ""
+        parts.append(replacement)
+        last = m.end()
+    parts.append(text[last:])
+    return "".join(parts).strip()
 
 
 def _placeholder_for(text: str) -> str:
@@ -87,7 +153,12 @@ def _chunks(text: str, limit: int = _SLACK_CHUNK_LEN) -> list[str]:
 
 
 async def _fetch_thread_history(
-    client, channel: str, thread_ts: str, current_ts: str, limit: int = 20
+    client,
+    channel: str,
+    thread_ts: str,
+    current_ts: str,
+    bot_user_id: str | None,
+    limit: int = 20,
 ) -> list[dict]:
     """Pull the last ~20 messages in this thread from Slack and normalize them
     for the brain. Filters out the current mention (and anything posted after it).
@@ -117,7 +188,7 @@ async def _fetch_thread_history(
                     continue
             except (TypeError, ValueError):
                 pass
-        text = _clean(m.get("text") or "")
+        text = await _resolve_mentions(client, m.get("text") or "", bot_user_id)
         if not text:
             continue
         role = "assistant" if m.get("bot_id") else "user"
@@ -158,10 +229,12 @@ def register(app: AsyncApp, runner: JobRunner) -> None:
             return
 
         raw = event.get("text") or ""
-        text = _clean(raw)
         thread_ts = event.get("thread_ts") or event["ts"]
         current_ts = event["ts"]
         user_id = event.get("user")
+
+        bot_uid = await _bot_user_id(client)
+        text = await _resolve_mentions(client, raw, bot_uid)
 
         if not text:
             await client.chat_postMessage(
@@ -172,7 +245,7 @@ def register(app: AsyncApp, runner: JobRunner) -> None:
             return
 
         thread_history = await _fetch_thread_history(
-            client, channel, thread_ts, current_ts
+            client, channel, thread_ts, current_ts, bot_uid
         )
 
         placeholder = await client.chat_postMessage(
