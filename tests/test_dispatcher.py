@@ -284,7 +284,8 @@ async def test_dispatcher_synthesizes_read_action_outputs(monkeypatch):
         user_id="U1",
     )
 
-    assert out == "KRP-123 specs: lookup driver by user ID."
+    assert "KRP-123 specs: lookup driver by user ID." in out
+    assert "🛠️" in out  # footer line appended
     assert seen["user_text"] == "docs/specs KRP-123 là gì?"
     assert seen["tool_outputs"][0][0] == "jira.get_issue"
     assert "Lookup driver" in seen["tool_outputs"][0][1]

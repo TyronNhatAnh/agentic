@@ -71,6 +71,17 @@ class DispatchResult:
 
 _MAX_RETRIES = 2
 _RETRY_BACKOFF_S = (0.5, 1.5)
+
+
+def _footer(tool_count: int, elapsed_s: float) -> str:
+    plural = "s" if tool_count != 1 else ""
+    return f"_🛠️ {tool_count} tool{plural} · {elapsed_s:.1f}s_"
+
+
+def _with_footer(reply: str, tool_count: int, t_start: float) -> str:
+    if tool_count <= 0:
+        return reply
+    return f"{reply}\n\n{_footer(tool_count, time.time() - t_start)}"
 _GITHUB_PR_RE = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
 _REPO_SLUG_RE = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b")
 
@@ -490,6 +501,8 @@ async def handle_message(
     user_id: str | None,
     thread_history: list[dict] | None = None,
 ) -> str:
+    t_start = time.time()
+    tool_count = 0
     text, input_truncated = _truncate(text, settings.max_input_chars, label="input")
     summary: str | None = None
     prior_messages: list[dict] = []
@@ -510,6 +523,7 @@ async def handle_message(
         action = Action(type="git.check_repo", payload={"repo": repo} if repo else {})
         t0 = time.time()
         tool_result = await _run_action(action)
+        tool_count += 1
         display, status, error_code = _format_action_result(tool_result)
         log_run(
             agent="tool:git.check_repo",
@@ -529,15 +543,17 @@ async def handle_message(
                 if repo:
                     fields["repo"] = repo
                 update_thread_fields(thread_ts, **fields)
-        return display
+        return _with_footer(display, tool_count, t_start)
 
     # Resume / cancel a pending confirmation before invoking brain.
     if pending:
         if _is_affirmative(text):
             clear_pending_confirmation(thread_ts)
-            return await _run_pending(
+            pending_reply = await _run_pending(
                 pending, thread_ts=thread_ts, channel=channel, user_id=user_id
             )
+            tool_count += 1
+            return _with_footer(pending_reply, tool_count, t_start)
         if _is_negative(text):
             clear_pending_confirmation(thread_ts)
             reply = "Ok đã hủy. Cho mình biết bạn muốn làm gì tiếp nhé."
@@ -553,7 +569,9 @@ async def handle_message(
         decision: BrainDecision = await decide(
             text, summary=summary, messages=prior_messages
         )
+        tool_count += 1
     except Exception as e:
+        tool_count += 1
         log_run(
             agent="brain",
             input_text=text,
@@ -565,7 +583,7 @@ async def handle_message(
             user_id=user_id,
             error=str(e),
         )
-        return f"❌ Brain failed: {e}"
+        return _with_footer(f"❌ Brain failed: {e}", tool_count, t_start)
 
     log_run(
         agent="brain",
@@ -579,7 +597,9 @@ async def handle_message(
     )
 
     if decision.need_clarification and decision.clarify_question:
-        return f"❓ {decision.clarify_question}"
+        return _with_footer(
+            f"❓ {decision.clarify_question}", tool_count, t_start
+        )
 
     result = DispatchResult()
     if input_truncated:
@@ -608,6 +628,7 @@ async def handle_message(
         if not runner:
             result.errors.append(f"unknown agent `{step.agent}`")
             continue
+        tool_count += 1
         t0 = time.time()
         output: str | None = None
         status = "error"
@@ -659,6 +680,7 @@ async def handle_message(
     for action in actions:
         t0 = time.time()
         tool_result = await _run_action(action)
+        tool_count += 1
         display, status, error_code = _format_action_result(tool_result)
         log_run(
             agent=f"tool:{action.type}",
@@ -672,6 +694,7 @@ async def handle_message(
             error=error_code,
         )
         if status == "ok" and _is_fix_pr_request(text, action):
+            tool_count += 1
             fix_output, fix_status, fix_err = await _run_fix_after_pr_diff(
                 action=action,
                 diff=display,
@@ -688,6 +711,7 @@ async def handle_message(
                 result.errors.append(f"dev: {fix_err or 'failed'}")
                 last_agent = f"tool:{action.type}"
         elif status == "ok" and _is_review_pr_request(text, action):
+            tool_count += 1
             review_output, review_status, review_err = await _run_review_after_pr_diff(
                 action=action,
                 diff=display,
@@ -726,6 +750,7 @@ async def handle_message(
                 tool_outputs=read_action_outputs,
                 summary=summary,
             )
+            tool_count += 1
             result.add(synthesized.strip())
         except Exception as e:
             log.exception("action reply synthesis failed")
@@ -735,10 +760,12 @@ async def handle_message(
 
     rendered = result.render()
     if not saw_review_output:
+        if len(rendered) > _REPLY_SAFE_LEN:
+            tool_count += 1
         rendered = await _shrink_reply(rendered)
     if thread_ts:
         add_message(thread_ts, "assistant", rendered)
         if last_agent:
             update_thread_fields(thread_ts, last_agent=last_agent)
         maybe_schedule_summary(thread_ts)
-    return rendered
+    return _with_footer(rendered, tool_count, t_start)
