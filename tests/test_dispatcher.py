@@ -1,10 +1,7 @@
-import os
-import tempfile
-
 import pytest
 
-os.environ.setdefault("AGENTIC_DB", tempfile.mktemp(suffix=".db"))
-
+# AGENTIC_DB / AGENTIC_SERVICES_JSON are set in tests/conftest.py, which pytest
+# imports before this module so the agentic.config settings singleton picks them up.
 from agentic.agents import ba, dev, po, review  # noqa: E402
 from agentic import dispatcher  # noqa: E402
 from agentic.brain import Action, BrainDecision, Step  # noqa: E402
@@ -289,3 +286,42 @@ async def test_dispatcher_synthesizes_read_action_outputs(monkeypatch):
     assert seen["user_text"] == "docs/specs KRP-123 là gì?"
     assert seen["tool_outputs"][0][0] == "jira.get_issue"
     assert "Lookup driver" in seen["tool_outputs"][0][1]
+
+
+def test_has_log_output_only_for_loki():
+    assert dispatcher._has_log_output([("grafana.search_logs", "...")]) is True
+    assert dispatcher._has_log_output([("jira.get_issue", "...")]) is False
+    assert dispatcher._has_log_output([]) is False
+    # mixed: log present anywhere → True
+    assert dispatcher._has_log_output(
+        [("jira.get_issue", "..."), ("grafana.search_logs", "...")]
+    ) is True
+
+
+async def test_synthesize_injects_grounding_rules_for_logs(monkeypatch):
+    captured = {}
+
+    async def fake_run_claude(system, user):
+        captured["system"] = system
+        return "ok"
+
+    monkeypatch.setattr(dispatcher, "run_claude", fake_run_claude)
+
+    # logs present → grounding block must be appended
+    await dispatcher._synthesize_action_reply(
+        user_text="tóm tắt lỗi order 2717068",
+        tool_outputs=[("grafana.search_logs", "PUT /orders/2717068/assign 200")],
+        summary=None,
+    )
+    assert "XUẤT HIỆN NGUYÊN VĂN" in captured["system"]
+    assert "không có trong log" in captured["system"]
+    assert "truncated" in captured["system"]
+
+    # no logs → no grounding block
+    captured.clear()
+    await dispatcher._synthesize_action_reply(
+        user_text="docs KRP-123",
+        tool_outputs=[("jira.get_issue", "*KRP-123* specs")],
+        summary=None,
+    )
+    assert "XUẤT HIỆN NGUYÊN VĂN" not in captured["system"]

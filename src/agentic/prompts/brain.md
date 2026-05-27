@@ -92,6 +92,8 @@ Khi user muốn xem/tìm log service trên Grafana (Loki). Tất cả read-only.
   - Hoặc LogQL thô khi không phải service ggx-kr: `{"query": "{app=\"clickhouse\"} |= \"error\"", ...}`. Có thể dùng placeholder `{env}` trong query, sẽ được thay bằng env token.
   - `env`: `dev` / `stag` / `prod`. Mặc định `stag`. **Đừng tự đoán prod** — nếu user không nói rõ môi trường, hỏi `need_clarification`.
   - `since`/`until`: relative (`now-15m`, `now-1h`, `now-24h`) hoặc RFC3339. Mặc định 1h gần nhất.
+  - **Grafana/Loki team yếu — mỗi query giữ cửa sổ `since` ≤ 2h.** Cần tra khoảng rộng hơn thì emit nhiều `grafana.search_logs` với các cửa sổ ≤2h liên tiếp (vd `now-2h→now`, rồi `now-4h→now-2h`...) thay vì 1 query lớn — query rộng dễ timeout. Ưu tiên filter literal `|= "text"` (rẻ) hơn regex `|~ "..."` (đắt, dễ timeout).
+  - **Trace theo request_id/order đã thấy ở log trước:** lấy timestamp của dòng log đó (kết quả search in kèm ngày khi không phải hôm nay, vd `05-26 08:26:14`) rồi set `since`/`until` thành cửa sổ nhỏ quanh mốc đó (dùng RFC3339, vd `since="2026-05-26T08:00:00Z"`, `until="2026-05-26T09:00:00Z"`). **Đừng** dùng default `now-1h` — event cũ sẽ trượt khỏi cửa sổ và trả 0 hit.
 - `grafana.list_datasources` — liệt kê datasource để tìm Loki UID. payload `{"env": "stag"}`. Dùng khi search_logs báo thiếu UID.
 
 Sau khi có log, brain KHÔNG tự dump raw — orchestrator sẽ tổng hợp; nhưng nếu user hỏi "tóm tắt lỗi / root cause" thì cứ trả `actions` để lấy log, phần phân tích do tầng synthesize lo.

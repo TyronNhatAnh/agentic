@@ -25,6 +25,9 @@ from .result import ToolResult, classify_exception
 # Loki caps; keep requests bounded so a broad query can't dump unbounded logs.
 _MAX_LIMIT = 200
 _DEFAULT_LIMIT = 50
+# Per-line cap. Big enough to fit a typical JSON request log (so fields like
+# user_id/hash aren't silently dropped) but still bounded.
+_MAX_LINE_LEN = 1500
 
 
 # env token → k8s namespace prefix used in the Loki `job` label (kr-<ns>/...).
@@ -104,9 +107,13 @@ def _proxy_url(base: str, uid: str, path: str) -> str:
 
 
 def _fmt_ts(ts_ns: str) -> str:
+    """Render a Loki epoch-ns timestamp (UTC). Includes the date when the log is
+    not from today so a follow-up trace can anchor its time window — otherwise a
+    bare `HH:MM:SS` is ambiguous across days and the window has to be re-supplied."""
     try:
         dt = datetime.fromtimestamp(int(ts_ns) / 1e9, tz=timezone.utc)
-        return dt.strftime("%H:%M:%S")
+        fmt = "%H:%M:%S" if dt.date() == datetime.now(timezone.utc).date() else "%m-%d %H:%M:%S"
+        return dt.strftime(fmt)
     except (ValueError, OverflowError):
         return "??:??:??"
 
@@ -143,7 +150,13 @@ def _format_streams(payload: dict, *, query: str, env: str, limit: int) -> str:
         svc = labels.get("app") or labels.get("service") or labels.get("container") or ""
         lvl = labels.get("level") or labels.get("detected_level") or ""
         prefix = " ".join(p for p in (_fmt_ts(ts_ns), lvl, svc) if p)
-        lines.append(f"`{prefix}` {line.strip()[:500]}")
+        body = line.strip()
+        # Order/assign logs are big JSON; a silent cut makes a downstream summarizer
+        # invent the fields it can't see (id/user_id/hash). Keep more, and mark the cut
+        # so the model knows it's looking at a truncated line rather than the whole record.
+        if len(body) > _MAX_LINE_LEN:
+            body = body[:_MAX_LINE_LEN] + " …[truncated]"
+        lines.append(f"`{prefix}` {body}")
     return "\n".join(lines)
 
 

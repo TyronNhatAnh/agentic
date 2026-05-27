@@ -221,6 +221,11 @@ def _is_read_action(action_type: str) -> bool:
     return not action_type.startswith(write_prefixes)
 
 
+def _has_log_output(tool_outputs: list[tuple[str, str]]) -> bool:
+    """True if any tool output is Loki log lines — those need grounding rules."""
+    return any(at == "grafana.search_logs" for at, _ in tool_outputs)
+
+
 async def _synthesize_action_reply(
     *,
     user_text: str,
@@ -234,6 +239,18 @@ async def _synthesize_action_reply(
         "hãy tóm tắt phần liên quan thay vì dump raw toàn bộ. "
         "Giữ link/key quan trọng."
     )
+    if _has_log_output(tool_outputs):
+        # Log lines invite the model to fill in fields it never saw (user_id, hash,
+        # device, ip) because an "incident report" format implies they exist. Force
+        # field-level grounding so a truncated/absent value becomes UNKNOWN, not a guess.
+        system += (
+            "\n\nDữ liệu tool gồm log. Quy tắc BẮT BUỘC khi đọc log:\n"
+            "- Chỉ nêu giá trị (id, order_id, user_id, ip, device, hash, status code...) "
+            "nếu nó XUẤT HIỆN NGUYÊN VĂN trong dòng log. Tuyệt đối không suy diễn/điền cho đủ format.\n"
+            "- Field không thấy trong log → ghi rõ `không có trong log` hoặc bỏ qua, KHÔNG đoán.\n"
+            "- Dòng có `…[truncated]` là đã bị cắt — đừng bịa phần sau dấu cắt.\n"
+            "- Tách rõ phần *quan sát từ log* (fact) và *giả thuyết* (suy luận của bạn)."
+        )
     blocks = []
     if summary:
         blocks.append(f"## Thread summary\n{summary.strip()}")
