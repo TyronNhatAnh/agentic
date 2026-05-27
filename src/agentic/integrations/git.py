@@ -51,7 +51,17 @@ async def check_repo(service: str | None = None, repo: str | None = None) -> Too
             f"Chưa có mapping local cho `{target}` trong service_repos.",
         )
 
-    repo_path = Path(svc["repo_path"])
+    # Empty repo_path → Path("") resolves to "." (the bot's own working dir, which
+    # is itself a git repo) and would silently pass the .is_dir()/.git checks below,
+    # reporting the agentic repo's branch as if it were the service. Reject explicitly.
+    raw_path = (svc.get("repo_path") or "").strip()
+    if not raw_path:
+        return ToolResult.failure(
+            "CONFIG",
+            f"Service `{svc['name']}` chưa cấu hình `repo_path` (chưa có clone local). "
+            "Set path trong services.json/service_repos trước nhé.",
+        )
+    repo_path = Path(raw_path)
     github_repo = svc.get("github_repo") or "(chưa set github_repo)"
     if not repo_path.is_dir():
         return ToolResult.failure(
@@ -80,8 +90,13 @@ async def check_repo(service: str | None = None, repo: str | None = None) -> Too
 
 
 async def _resolve_base_branch(service: dict) -> str:
-    """Format base branch using service template (or global default) + active sprint."""
-    template = service.get("base_branch_template") or settings.base_branch_template
+    """Format the base branch from the global template + active sprint.
+
+    The base branch is locked org-wide to `settings.base_branch_template`
+    (`releases/DAPro-2.{sprint}`); per-service `base_branch_template` overrides are
+    intentionally ignored so every service branches off the same release line.
+    """
+    template = settings.base_branch_template
     if "{sprint}" not in template:
         return template
     board_id = service.get("jira_board_id") or settings.jira_board_id
@@ -106,7 +121,14 @@ async def prepare_workspace(service: str, ticket: str,
             f"Không tìm thấy service `{service}` trong mapping. "
             f"Kiểm tra bảng service_repos.",
         )
-    repo_path = svc["repo_path"]
+    repo_path = (svc.get("repo_path") or "").strip()
+    if not repo_path:
+        # Empty path would become Path(".") = the bot's own repo; never fetch/worktree there.
+        return ToolResult.failure(
+            "CONFIG",
+            f"Service `{svc['name']}` chưa cấu hình `repo_path` (chưa có clone local). "
+            "Set path trong services.json/service_repos trước nhé.",
+        )
     if not Path(repo_path).is_dir() or not Path(repo_path, ".git").exists():
         return ToolResult.failure(
             "CONFIG",
@@ -305,7 +327,14 @@ async def prepare_pr_review_workspace(repo: str, pr: int) -> ToolResult:
             f"Không tìm thấy local repo mapping cho `{repo}` trong service_repos.",
         )
 
-    repo_path = svc["repo_path"]
+    repo_path = (svc.get("repo_path") or "").strip()
+    if not repo_path:
+        # Empty path would become Path(".") = the bot's own repo; never fetch/worktree there.
+        return ToolResult.failure(
+            "CONFIG",
+            f"Service `{svc['name']}` chưa cấu hình `repo_path` (chưa có clone local). "
+            "Set path trong services.json/service_repos trước nhé.",
+        )
     if not Path(repo_path).is_dir() or not Path(repo_path, ".git").exists():
         return ToolResult.failure(
             "CONFIG",
