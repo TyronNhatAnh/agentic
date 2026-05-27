@@ -51,3 +51,24 @@ def test_short_field_within_cap_survives():
     )
     assert "user_id=400158" in out
     assert "…[truncated]" not in out
+
+
+_SVC = {"name": "payment-service", "loki_selector": '{job="kr-{env}/argo-ggx-kr-payment-service"}'}
+
+
+def test_freeform_filter_rejected_before_loki(monkeypatch):
+    """A search-expression filter must fail fast with a syntax hint, not reach Loki."""
+    monkeypatch.setattr(grafana, "resolve_service", lambda _: _SVC)
+    q, err = grafana._resolve_query(
+        "", "payment-service", 'level:error OR error OR "HTTP 500"'
+    )
+    assert q is None
+    assert err is not None and err.error_code == "VALIDATION"
+    assert "line filter" in err.user_message
+
+
+def test_valid_line_filter_is_appended(monkeypatch):
+    monkeypatch.setattr(grafana, "resolve_service", lambda _: _SVC)
+    q, err = grafana._resolve_query("", "payment-service", '|= "error" |= "500"')
+    assert err is None
+    assert q == _SVC["loki_selector"] + ' |= "error" |= "500"'

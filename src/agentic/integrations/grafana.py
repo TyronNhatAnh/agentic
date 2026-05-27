@@ -71,6 +71,9 @@ def _env_conf(env: str | None) -> tuple[str, str, str, str]:
 
 
 _REL_RE = re.compile(r"^now(?:-(\d+)([smhdw]))?$")
+# Bare relative (no `now-` prefix), e.g. `20m`/`2h` — treated as "that long ago".
+# The model (and users copying "20p") naturally emit this; accept it as now-<N><unit>.
+_BARE_REL_RE = re.compile(r"^(\d+)([smhdw])$")
 _UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
@@ -78,11 +81,12 @@ def _to_ns(expr: str) -> str:
     """Convert a time expression to a Loki-native epoch-nanosecond string.
 
     Loki's query_range does NOT accept Grafana relative syntax (`now-1h`); it wants
-    epoch ns or RFC3339. We accept `now`, `now-<N><s|m|h|d|w>`, RFC3339, or a raw
-    epoch (seconds or ns) and normalize to ns.
+    epoch ns or RFC3339. We accept `now`, `now-<N><s|m|h|d|w>`, a bare relative
+    `<N><s|m|h|d|w>` (treated as "ago"), RFC3339, or a raw epoch (seconds or ns)
+    and normalize to ns.
     """
     s = (expr or "").strip()
-    m = _REL_RE.match(s)
+    m = _REL_RE.match(s) or _BARE_REL_RE.match(s)
     if m:
         now_ns = time.time_ns()
         if not m.group(1):  # bare "now"
@@ -183,7 +187,22 @@ def _resolve_query(query: str, service: str, log_filter: str) -> tuple[str | Non
                 f"Service `{svc['name']}` chưa cấu hình `loki_selector` trong registry.",
             )
         if log_filter and log_filter.strip():
-            selector = f"{selector} {log_filter.strip()}"
+            f = log_filter.strip()
+            # The filter is concatenated raw onto the stream selector, so it must be
+            # a valid LogQL line filter (`|=`/`|~`/`!=`/`!~ "..."`) or pipeline stage
+            # (`| json`, `| level="error"`). A free-form search expression like
+            # `level:error OR error OR "HTTP 500"` produces a cryptic Loki 400
+            # ("unexpected IDENTIFIER"); reject it here with a syntax hint instead.
+            if not f.startswith(("|=", "|~", "!=", "!~", "|")):
+                return None, ToolResult.failure(
+                    "VALIDATION",
+                    f"`filter` phải là LogQL line filter, không phải biểu thức tìm kiếm. "
+                    f"Nhận được: `{f[:120]}`.\n"
+                    'Đúng: `|= "error"` · nhiều term AND: `|= "error" |= "500"` · '
+                    'OR/case-insensitive: `|~ "(?i)error|exception|fatal|500"`. '
+                    "LogQL không có toán tử `OR` hay cú pháp `level:error`.",
+                )
+            selector = f"{selector} {f}"
         return selector, None
     return None, ToolResult.failure(
         "VALIDATION", "Cần `query` (LogQL) hoặc `service` (tên service trong registry)."

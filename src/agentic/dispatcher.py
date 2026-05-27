@@ -82,9 +82,22 @@ def _footer(tool_count: int, elapsed_s: float) -> str:
 
 
 def _with_footer(reply: str, tool_count: int, t_start: float) -> str:
+    reply = _sanitize_reply_tone(reply)
     if tool_count <= 0:
         return reply
     return f"{reply}\n\n{_footer(tool_count, time.time() - t_start)}"
+
+
+_BANNED_REPLY_PRONOUNS = (
+    (re.compile(r"(?<!\w)tao(?!\w)", re.IGNORECASE), "mình"),
+    (re.compile(r"(?<!\w)mày(?!\w)", re.IGNORECASE), "bạn"),
+)
+
+
+def _sanitize_reply_tone(text: str) -> str:
+    for pattern, replacement in _BANNED_REPLY_PRONOUNS:
+        text = pattern.sub(replacement, text)
+    return text
 _GITHUB_PR_RE = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
 _REPO_SLUG_RE = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b")
 

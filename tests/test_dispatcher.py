@@ -71,6 +71,20 @@ async def test_dispatcher_clarification(monkeypatch):
     assert "Which repo?" in out
 
 
+async def test_dispatcher_sanitizes_casual_pronouns(monkeypatch):
+    async def casual_reply(msg, *, summary=None, messages=None, workspace_hint=None):
+        return BrainDecision(reply="Muốn tao retry scan cho mày không?", raw="(mocked)")
+
+    monkeypatch.setattr(dispatcher, "decide", casual_reply)
+    out = await dispatcher.handle_message(
+        "hello", thread_ts="t-tone", channel="C1", user_id="U1"
+    )
+
+    assert "Muốn mình retry scan cho bạn không?" in out
+    assert "tao" not in out.lower()
+    assert "mày" not in out.lower()
+
+
 async def test_dispatcher_auto_reviews_fetched_pr_diff(monkeypatch):
     diff = "*PR #431 `gogovan/ggx-kr-user-service` diff*:\n```diff\n+new code\n```"
     seen = {}

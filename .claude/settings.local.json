@@ -97,7 +97,10 @@
       "Bash(sqlite3 agentic.db \"SELECT role || ': ' || text FROM messages WHERE id BETWEEN 585 AND 595 ORDER BY id;\")",
       "Read(//tmp/**)",
       "Bash(pkill -f stuckfifo)",
-      "Bash(rm -f /tmp/stuckfifo)"
+      "Bash(rm -f /tmp/stuckfifo)",
+      "Bash(git push *)",
+      "Bash(git config *)",
+      "Bash(ps -p 9079 -o pid,lstart,etime,command)"
     ],
     "deny": [
       "Read(//Users/tyron/Projects/agentic/.env)",
