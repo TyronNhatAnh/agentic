@@ -97,6 +97,7 @@ Rules:
 * since <= 2h.
 * query khoảng lớn thì chia nhiều request.
 * read-only nên không cần confirm.
+* Timestamp Loki/Grafana luôn là UTC. Khi báo lại cho user, convert và hiển thị song song: `HH:MM UTC → HH:MM VN (UTC+7) / HH:MM KST (UTC+9)`.
 
 # GitHub
 
