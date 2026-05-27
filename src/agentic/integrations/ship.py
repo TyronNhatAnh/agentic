@@ -15,7 +15,6 @@ from pathlib import Path
 
 import httpx
 
-from ..config import settings
 from ..store import resolve_service
 from . import git as git_int
 from . import github
@@ -59,7 +58,7 @@ async def create_pr(
         return ToolResult.failure(
             "NOT_FOUND", f"Không tìm thấy service `{service}` trong mapping."
         )
-    worktree_path = Path(settings.worktree_dir) / svc["name"] / ticket
+    worktree_path = git_int.worktree_path_for(svc, ticket)
     if not worktree_path.is_dir() or not Path(worktree_path, ".git").exists():
         return ToolResult.failure(
             "NOT_FOUND",

@@ -575,6 +575,36 @@ def _dev_cwd_from_context(
     return None, None
 
 
+async def _dev_workspace_context(thread_row: dict) -> str:
+    """Facts about the active worktree, injected so the dev agent can push + open
+    a PR itself. The *procedure* lives in prompts/dev.md; here we only supply values.
+    """
+    ticket = (thread_row.get("active_ticket") or "").strip()
+    worktree = (thread_row.get("active_worktree") or "").strip()
+    repo = (thread_row.get("repo") or "").strip()
+    branch = f"feature/{ticket}" if ticket else "(branch hiện tại của worktree)"
+    base = ""
+    if repo:
+        svc = resolve_service_by_github_repo(repo)
+        if svc:
+            try:
+                base = await git_int._resolve_base_branch(svc)
+            except Exception:
+                log.warning("could not resolve base branch for dev workspace context")
+    lines = [
+        "## Workspace (bạn đang đứng ở đây)",
+        f"- Worktree (cwd của bạn): `{worktree}`",
+        f"- Branch: `{branch}`",
+    ]
+    if repo:
+        lines.append(f"- Repo GitHub: `{repo}`")
+    if base:
+        lines.append(f"- Base branch để mở PR: `{base}`")
+    if ticket:
+        lines.append(f"- Ticket: `{ticket}`")
+    return "\n".join(lines)
+
+
 def _dev_context_for_step(prior_output: str, prior_messages: list[dict]) -> str:
     if prior_output:
         context, _ = _truncate(
@@ -604,6 +634,7 @@ async def handle_message(
     summary: str | None = None
     prior_messages: list[dict] = []
     pending: dict | None = None
+    thread_row: dict | None = None
     if thread_ts:
         touch_thread(thread_ts, channel)
         thread_row = get_thread(thread_ts)
@@ -733,13 +764,24 @@ async def handle_message(
         try:
             if step.agent == "dev":
                 context_for_step = _dev_context_for_step(prior_output, prior_messages)
-                dev_slug, dev_cwd = _dev_cwd_from_context(
-                    thread_row if thread_ts else None,
-                    text=text,
-                    prior_messages=prior_messages,
-                )
-                if dev_slug and thread_ts and not (thread_row or {}).get("repo"):
-                    update_thread_fields(thread_ts, repo=dev_slug)
+                # A worktree prepared earlier in this thread wins: the dev agent
+                # must edit (and push/PR) inside it, not in the shared clone.
+                active_wt = ((thread_row or {}).get("active_worktree") or "").strip()
+                if active_wt and Path(active_wt).is_dir():
+                    dev_cwd = active_wt
+                    ws_ctx = await _dev_workspace_context(thread_row)
+                    context_for_step = (
+                        f"{ws_ctx}\n\n---\n{context_for_step}"
+                        if context_for_step else ws_ctx
+                    )
+                else:
+                    dev_slug, dev_cwd = _dev_cwd_from_context(
+                        thread_row if thread_ts else None,
+                        text=text,
+                        prior_messages=prior_messages,
+                    )
+                    if dev_slug and thread_ts and not (thread_row or {}).get("repo"):
+                        update_thread_fields(thread_ts, repo=dev_slug)
                 output = await _run_dev_direct(
                     step.task,
                     context=context_for_step,
@@ -791,6 +833,22 @@ async def handle_message(
             user_id=user_id,
             error=error_code,
         )
+        if (
+            status == "ok"
+            and action.type == "git.prepare_workspace"
+            and thread_ts
+            and isinstance(tool_result.data, dict)
+        ):
+            data = tool_result.data
+            fields: dict = {}
+            if data.get("ticket"):
+                fields["active_ticket"] = data["ticket"]
+            if data.get("worktree_path"):
+                fields["active_worktree"] = data["worktree_path"]
+            if data.get("github_repo"):
+                fields["repo"] = data["github_repo"]
+            if fields:
+                update_thread_fields(thread_ts, **fields)
         if status == "ok" and _is_fix_pr_request(text, action):
             tool_count += 1
             fix_output, fix_status, fix_err = await _run_fix_after_pr_diff(

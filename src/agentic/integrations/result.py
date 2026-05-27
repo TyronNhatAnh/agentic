@@ -23,7 +23,13 @@ class ToolResult:
         return cls(ok=False, error_code=error_code, user_message=user_message, retryable=retryable)
 
     def display(self) -> str:
-        return self.data if self.ok else (self.user_message or "")
+        if not self.ok:
+            return self.user_message or ""
+        # Structured successes carry a user-facing "message" key alongside machine
+        # fields (e.g. worktree_path). Render only the message to Slack.
+        if isinstance(self.data, dict):
+            return str(self.data.get("message", ""))
+        return self.data
 
 
 def classify_exception(exc: BaseException, *, service: str) -> ToolResult:

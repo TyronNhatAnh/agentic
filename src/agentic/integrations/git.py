@@ -37,6 +37,38 @@ async def _branch_exists(repo_path: str, ref: str) -> bool:
     return rc == 0
 
 
+def worktree_path_for(svc: dict, ticket: str) -> Path:
+    """Resolve the absolute worktree path for a service + ticket.
+
+    Single source of truth — prepare/commit/push/ship all call this so the path
+    can never diverge. The path MUST be absolute: `git worktree add` resolves a
+    relative path against git's cwd (the repo), while later `Path.is_dir()` checks
+    resolve against the bot process cwd — a relative path makes those two disagree
+    and the worktree appears "missing" right after it was created.
+
+    - WORKTREE_DIR set  → `<WORKTREE_DIR>/<service>/<ticket>`.
+    - WORKTREE_DIR empty → `<repo_path>/.worktrees/<ticket>` (lives inside the
+      service clone, same filesystem git prefers).
+    """
+    base = (settings.worktree_dir or "").strip()
+    if base:
+        return (Path(base).expanduser() / svc["name"] / ticket).resolve()
+    repo_path = (svc.get("repo_path") or "").strip()
+    return (Path(repo_path).resolve() / ".worktrees" / ticket)
+
+
+async def _worktree_registered(repo_path: str, worktree_path: Path) -> bool:
+    """Authoritative check via `git worktree list` (not a filesystem guess)."""
+    rc, out, _ = await _run_git("worktree", "list", "--porcelain", cwd=repo_path)
+    if rc != 0:
+        return worktree_path.is_dir() and Path(worktree_path, ".git").exists()
+    target = str(worktree_path.resolve())
+    for line in out.splitlines():
+        if line.startswith("worktree ") and Path(line[len("worktree "):]).resolve() == Path(target):
+            return True
+    return False
+
+
 async def check_repo(service: str | None = None, repo: str | None = None) -> ToolResult:
     """Read-only check for local service repository mapping and checkout status."""
     svc = None
@@ -188,13 +220,23 @@ async def prepare_workspace(service: str, ticket: str,
         )
 
     # 4. Create worktree
-    worktree_path = Path(settings.worktree_dir) / svc["name"] / ticket
+    worktree_path = worktree_path_for(svc, ticket)
     feature_branch = f"feature/{ticket}"
 
-    if worktree_path.exists():
+    if await _worktree_registered(repo_path, worktree_path):
         return ToolResult.success(
-            f"📂 Worktree đã có sẵn tại `{worktree_path}` (branch `{feature_branch}`). "
-            f"Vào đó code tiếp nha."
+            {
+                "service": svc["name"],
+                "github_repo": (svc.get("github_repo") or "").strip(),
+                "ticket": ticket,
+                "base": base,
+                "feature_branch": feature_branch,
+                "worktree_path": str(worktree_path),
+                "message": (
+                    f"📂 Worktree đã có sẵn tại `{worktree_path}` "
+                    f"(branch `{feature_branch}`). Vào đó code tiếp nha."
+                ),
+            }
         )
 
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
@@ -214,12 +256,21 @@ async def prepare_workspace(service: str, ticket: str,
         return ToolResult.failure("GIT_WORKTREE", f"git worktree add lỗi: {err[:300]}")
 
     return ToolResult.success(
-        f"✅ Worktree sẵn sàng:\n"
-        f"• Service: `{svc['name']}`\n"
-        f"• Base: `{base}`\n"
-        f"• Branch: `{feature_branch}`\n"
-        f"• Path: `{worktree_path}`\n"
-        f"`cd {worktree_path}` để bắt đầu code."
+        {
+            "service": svc["name"],
+            "ticket": ticket,
+            "base": base,
+            "feature_branch": feature_branch,
+            "worktree_path": str(worktree_path),
+            "message": (
+                f"✅ Worktree sẵn sàng:\n"
+                f"• Service: `{svc['name']}`\n"
+                f"• Base: `{base}`\n"
+                f"• Branch: `{feature_branch}`\n"
+                f"• Path: `{worktree_path}`\n"
+                f"`cd {worktree_path}` để bắt đầu code."
+            ),
+        }
     )
 
 
@@ -236,7 +287,7 @@ async def commit_branch(service: str, ticket: str, message: str,
         return ToolResult.failure(
             "NOT_FOUND", f"Không tìm thấy service `{service}` trong mapping."
         )
-    worktree_path = Path(settings.worktree_dir) / svc["name"] / ticket
+    worktree_path = worktree_path_for(svc, ticket)
     if not worktree_path.is_dir() or not Path(worktree_path, ".git").exists():
         return ToolResult.failure(
             "NOT_FOUND",
@@ -293,7 +344,7 @@ async def push_branch(service: str, ticket: str,
         return ToolResult.failure(
             "NOT_FOUND", f"Không tìm thấy service `{service}` trong mapping."
         )
-    worktree_path = Path(settings.worktree_dir) / svc["name"] / ticket
+    worktree_path = worktree_path_for(svc, ticket)
     if not worktree_path.is_dir() or not Path(worktree_path, ".git").exists():
         return ToolResult.failure(
             "NOT_FOUND",
@@ -356,7 +407,11 @@ async def prepare_pr_review_workspace(repo: str, pr: int) -> ToolResult:
     if rc != 0 or not sha:
         return ToolResult.failure("GIT_FETCH", f"Không resolve được FETCH_HEAD: {err[:300]}")
 
-    worktree_path = Path(settings.worktree_dir) / "_pr_reviews" / svc["name"] / f"pr-{pr}"
+    base = (settings.worktree_dir or "").strip()
+    if base:
+        worktree_path = (Path(base).expanduser() / "_pr_reviews" / svc["name"] / f"pr-{pr}").resolve()
+    else:
+        worktree_path = Path(repo_path).resolve() / ".worktrees" / "_pr_reviews" / f"pr-{pr}"
     if worktree_path.exists():
         if not Path(worktree_path, ".git").exists():
             return ToolResult.failure(

@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS threads (
     last_agent TEXT,
     jira_keys TEXT,
     pr_refs TEXT,
-    repo TEXT
+    repo TEXT,
+    active_ticket TEXT,
+    active_worktree TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -113,9 +115,14 @@ _THREAD_ADDED_COLUMNS = {
     "jira_keys": "TEXT",
     "pr_refs": "TEXT",
     "repo": "TEXT",
+    "active_ticket": "TEXT",
+    "active_worktree": "TEXT",
 }
 
-_THREAD_FIELDS = {"summary", "last_agent", "jira_keys", "pr_refs", "repo"}
+_THREAD_FIELDS = {
+    "summary", "last_agent", "jira_keys", "pr_refs", "repo",
+    "active_ticket", "active_worktree",
+}
 
 # Columns added to service_repos after its initial release; migrated on startup
 # via ALTER TABLE since CREATE TABLE IF NOT EXISTS won't alter an existing table.

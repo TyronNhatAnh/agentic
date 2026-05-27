@@ -25,6 +25,8 @@ async def run_claude(
     timeout: int | None = None,
     prompt_mode: str = "system",
     permission_mode: str | None = None,
+    allowed_tools: list[str] | None = None,
+    disallowed_tools: list[str] | None = None,
 ) -> str:
     """Invoke `claude -p` as a subprocess and return stdout text.
 
@@ -45,6 +47,14 @@ async def run_claude(
     ]
     if permission_mode:
         args.extend(["--permission-mode", permission_mode])
+    # Scoped grants for this invocation only. The dev agent runs with cwd set to a
+    # *service* worktree, so the bot's own .claude settings don't apply to it —
+    # grants must travel on the command line. deny wins over allow, so force-push
+    # and history-rewrite stay blocked even with `Bash(git push:*)` allowed.
+    if allowed_tools:
+        args.extend(["--allowedTools", *allowed_tools])
+    if disallowed_tools:
+        args.extend(["--disallowedTools", *disallowed_tools])
     # When using a non-default cwd (i.e. an actual repo), allow tool access to
     # the workspace root so claude can reach any service repo under it.
     # Falls back to the cwd itself if workspace_dir is not configured.
