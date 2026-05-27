@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     github_default_repo: str = Field(default="", alias="GITHUB_DEFAULT_REPO")
     github_username: str = Field(default="", alias="GITHUB_USERNAME")
 
+    grafana_api_key_stag: str = Field(default="", alias="GRAFANA_API_KEY_STAG")
+    grafana_stag_base_url: str = Field(default="", alias="GRAFANA_STAG_BASE_URL")
+    grafana_stag_loki_uid: str = Field(default="", alias="GRAFANA_STAG_LOKI_UID")
+    grafana_api_key_prod: str = Field(default="", alias="GRAFANA_API_KEY_PROD")
+    grafana_prod_base_url: str = Field(default="", alias="GRAFANA_PROD_BASE_URL")
+    grafana_prod_loki_uid: str = Field(default="", alias="GRAFANA_PROD_LOKI_UID")
+
     jira_base_url: str = Field(default="", alias="JIRA_BASE_URL")
     jira_email: str = Field(default="", alias="JIRA_EMAIL")
     jira_api_token: str = Field(default="", alias="JIRA_API_TOKEN")

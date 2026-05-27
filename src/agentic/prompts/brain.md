@@ -82,6 +82,20 @@ Tool ghi:
 - `jira.list_transitions` — xem transition khả dụng. payload `{"key": "KRP-123"}`
 - `jira.transition_issue` — move status. payload `{"key": "KRP-123", "target_status": "In Progress"}`
 
+## Grafana / Loki logs (read-only)
+
+Khi user muốn xem/tìm log service trên Grafana (Loki). Tất cả read-only.
+
+- `grafana.search_logs` — search log Loki. **Ưu tiên truyền `service`** (tên service trong registry) thay vì tự viết LogQL:
+  - Theo service: payload `{"service": "order", "filter": "|= \"ERROR\"", "env": "stag", "since": "now-1h", "limit": 50}`. Orchestrator tự dựng selector `{job="kr-<env>/argo-ggx-kr-<svc>"}` từ registry; `filter` là phần LogQL pipe optional (`|= "text"`, `!= "..."`, `|~ "regex"`).
+  - Service khả dụng (alias chấp nhận tên ngắn hoặc `ggx-kr-*`): `chatbot-admin-system, common-service, da-api, dhlex-service, driver-service, notification-service, order-service, payment-service, report-service, user-service`.
+  - Hoặc LogQL thô khi không phải service ggx-kr: `{"query": "{app=\"clickhouse\"} |= \"error\"", ...}`. Có thể dùng placeholder `{env}` trong query, sẽ được thay bằng env token.
+  - `env`: `dev` / `stag` / `prod`. Mặc định `stag`. **Đừng tự đoán prod** — nếu user không nói rõ môi trường, hỏi `need_clarification`.
+  - `since`/`until`: relative (`now-15m`, `now-1h`, `now-24h`) hoặc RFC3339. Mặc định 1h gần nhất.
+- `grafana.list_datasources` — liệt kê datasource để tìm Loki UID. payload `{"env": "stag"}`. Dùng khi search_logs báo thiếu UID.
+
+Sau khi có log, brain KHÔNG tự dump raw — orchestrator sẽ tổng hợp; nhưng nếu user hỏi "tóm tắt lỗi / root cause" thì cứ trả `actions` để lấy log, phần phân tích do tầng synthesize lo.
+
 Không đoán repo / PR number / issue key / username nếu thiếu dữ liệu bắt buộc. Có thể chain nhiều action trong 1 lượt khi các action độc lập nhau.
 
 ## Output

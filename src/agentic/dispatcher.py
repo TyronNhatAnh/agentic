@@ -10,7 +10,7 @@ from .agents.base import run_claude
 from .brain import Action, BrainDecision, decide
 from .config import settings
 from .integrations import git as git_int
-from .integrations import github, jira
+from .integrations import github, grafana, jira
 from .integrations import ship as ship_int
 from .integrations.result import ToolResult
 from .store import (
@@ -367,6 +367,8 @@ async def _invoke_integration(action: Action) -> ToolResult:
         return await github.execute_action(action.type, action.payload)
     if action.type.startswith("jira."):
         return await jira.execute_action(action.type, action.payload)
+    if action.type.startswith("grafana."):
+        return await grafana.execute_action(action.type, action.payload)
     if action.type.startswith("git."):
         return await git_int.execute_action(action.type, action.payload)
     if action.type.startswith("ship."):

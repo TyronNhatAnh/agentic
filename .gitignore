@@ -46,3 +46,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Internal service registry (infra-specific, like .env)
+services.json

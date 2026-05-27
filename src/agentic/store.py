@@ -51,11 +51,12 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_ts, id);
 
 CREATE TABLE IF NOT EXISTS service_repos (
     name TEXT PRIMARY KEY,
-    repo_path TEXT NOT NULL,
+    repo_path TEXT,
     github_repo TEXT,
     base_branch_template TEXT,
     jira_board_id INTEGER,
-    aliases TEXT
+    aliases TEXT,
+    loki_selector TEXT
 );
 
 CREATE TABLE IF NOT EXISTS pending_confirmations (
@@ -84,7 +85,9 @@ def _load_service_seeds() -> list[dict]:
         return []
     seeds: list[dict] = []
     for item in raw:
-        if not isinstance(item, dict) or not item.get("name") or not item.get("repo_path"):
+        # repo_path is optional: a service may be registered for log/PR checks only,
+        # without a local clone (git/dev worktree ops just won't be available for it).
+        if not isinstance(item, dict) or not item.get("name"):
             continue
         aliases = item.get("aliases")
         if isinstance(aliases, list):
@@ -95,11 +98,12 @@ def _load_service_seeds() -> list[dict]:
             aliases_json = "[]"
         seeds.append({
             "name": item["name"],
-            "repo_path": item["repo_path"],
+            "repo_path": item.get("repo_path") or "",
             "github_repo": item.get("github_repo") or "",
             "base_branch_template": item.get("base_branch_template") or "",
             "jira_board_id": int(item.get("jira_board_id") or 0),
             "aliases": aliases_json,
+            "loki_selector": item.get("loki_selector") or "",
         })
     return seeds
 
@@ -113,6 +117,12 @@ _THREAD_ADDED_COLUMNS = {
 
 _THREAD_FIELDS = {"summary", "last_agent", "jira_keys", "pr_refs", "repo"}
 
+# Columns added to service_repos after its initial release; migrated on startup
+# via ALTER TABLE since CREATE TABLE IF NOT EXISTS won't alter an existing table.
+_SERVICE_ADDED_COLUMNS = {
+    "loki_selector": "TEXT",
+}
+
 
 def init_db() -> None:
     Path(settings.agentic_db).parent.mkdir(parents=True, exist_ok=True)
@@ -122,33 +132,39 @@ def init_db() -> None:
         for col, decl in _THREAD_ADDED_COLUMNS.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE threads ADD COLUMN {col} {decl}")
+        existing_svc = {row["name"] for row in conn.execute("PRAGMA table_info(service_repos)")}
+        for col, decl in _SERVICE_ADDED_COLUMNS.items():
+            if col not in existing_svc:
+                conn.execute(f"ALTER TABLE service_repos ADD COLUMN {col} {decl}")
         seeds = _load_service_seeds()
         if not seeds:
             return
-        row = conn.execute("SELECT COUNT(*) AS n FROM service_repos").fetchone()
-        if row["n"] == 0:
-            for s in seeds:
-                conn.execute(
-                    """
-                    INSERT INTO service_repos(name, repo_path, github_repo,
-                                              base_branch_template, jira_board_id, aliases)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (s["name"], s["repo_path"], s["github_repo"],
-                     s["base_branch_template"], s["jira_board_id"], s["aliases"]),
-                )
-        else:
-            for s in seeds:
-                if not s["github_repo"]:
-                    continue
-                conn.execute(
-                    """
-                    UPDATE service_repos
-                    SET github_repo=?
-                    WHERE name=? AND (github_repo IS NULL OR github_repo='')
-                    """,
-                    (s["github_repo"], s["name"]),
-                )
+        # Upsert every seed on each startup so the registry stays in sync with
+        # AGENTIC_SERVICES_JSON — adding a new service no longer needs a db-reset.
+        # github_repo/aliases/loki_selector come from the seed (source of truth);
+        # repo_path/base_branch_template are only overwritten when the seed sets
+        # them, so operator-supplied local paths survive.
+        for s in seeds:
+            conn.execute(
+                """
+                INSERT INTO service_repos(name, repo_path, github_repo,
+                                          base_branch_template, jira_board_id,
+                                          aliases, loki_selector)
+                VALUES (:name, :repo_path, :github_repo, :base_branch_template,
+                        :jira_board_id, :aliases, :loki_selector)
+                ON CONFLICT(name) DO UPDATE SET
+                    github_repo   = excluded.github_repo,
+                    aliases       = excluded.aliases,
+                    loki_selector = excluded.loki_selector,
+                    jira_board_id = excluded.jira_board_id,
+                    repo_path = CASE WHEN excluded.repo_path != ''
+                                     THEN excluded.repo_path ELSE service_repos.repo_path END,
+                    base_branch_template = CASE WHEN excluded.base_branch_template != ''
+                                     THEN excluded.base_branch_template
+                                     ELSE service_repos.base_branch_template END
+                """,
+                s,
+            )
 
 
 @contextmanager
