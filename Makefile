@@ -46,7 +46,7 @@ start:
 	@if [ -f $(PID_FILE) ] && kill -0 `cat $(PID_FILE)` 2>/dev/null; then \
 		echo "already running (pid=`cat $(PID_FILE)`)"; exit 1; \
 	fi
-	@nohup $(PY) -m $(PKG).main >> $(LOG_FILE) 2>&1 & echo $$! > $(PID_FILE)
+	@nohup $(PY) -m $(PKG).main < /dev/null >> $(LOG_FILE) 2>&1 & echo $$! > $(PID_FILE)
 	@sleep 1
 	@echo "started (pid=`cat $(PID_FILE)`), logs -> $(LOG_FILE)"
 

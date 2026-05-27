@@ -27,6 +27,7 @@ async def run_claude(
     permission_mode: str | None = None,
     allowed_tools: list[str] | None = None,
     disallowed_tools: list[str] | None = None,
+    model: str | None = None,
 ) -> str:
     """Invoke `claude -p` as a subprocess and return stdout text.
 
@@ -45,6 +46,8 @@ async def run_claude(
         "--output-format",
         "text",
     ]
+    if model:
+        args.extend(["--model", model])
     if permission_mode:
         args.extend(["--permission-mode", permission_mode])
     # Scoped grants for this invocation only. The dev agent runs with cwd set to a
@@ -62,9 +65,14 @@ async def run_claude(
         allowed = settings.workspace_dir or cwd
         args.extend(["--add-dir", allowed])
     log.debug("running claude: %s chars sys / %s chars user", len(system_prompt), len(user_prompt))
+    # The prompt is passed via -p; claude must NOT read stdin. The bot runs as a
+    # background daemon, so an inherited stdin (closed pipe / leftover bytes) makes
+    # `claude -p` wait, then reply with a stub like "(responding now)" without ever
+    # running its tools. Pin stdin to /dev/null so it proceeds immediately.
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=run_cwd,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

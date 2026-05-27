@@ -1,3 +1,4 @@
+from ..config import settings
 from .base import load_prompt, run_claude
 
 # Granted only when the dev agent edits inside a real worktree (apply_changes).
@@ -46,4 +47,5 @@ async def run_dev(
         permission_mode="acceptEdits" if apply_changes else None,
         allowed_tools=_DEV_ALLOWED_TOOLS if apply_changes else None,
         disallowed_tools=_DEV_DISALLOWED_TOOLS if apply_changes else None,
+        model=settings.dev_model,
     )

@@ -11,7 +11,6 @@ already in place by then.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import httpx
 
@@ -58,11 +57,11 @@ async def create_pr(
         return ToolResult.failure(
             "NOT_FOUND", f"Không tìm thấy service `{service}` trong mapping."
         )
-    worktree_path = git_int.worktree_path_for(svc, ticket)
-    if not worktree_path.is_dir() or not Path(worktree_path, ".git").exists():
+    worktree_path = await git_int.resolve_existing_worktree(svc, ticket)
+    if not worktree_path:
         return ToolResult.failure(
             "NOT_FOUND",
-            f"Chưa có worktree `{worktree_path}`. Chạy `git.prepare_workspace` trước.",
+            f"Chưa có worktree cho `feature/{ticket}`. Chạy `git.prepare_workspace` trước.",
         )
     github_repo = (svc.get("github_repo") or "").strip()
     if not github_repo or "/" not in github_repo:

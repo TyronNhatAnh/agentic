@@ -91,17 +91,20 @@ async def decide(
     *,
     summary: str | None = None,
     messages: list[dict] | None = None,
+    workspace_hint: str | None = None,
 ) -> BrainDecision:
     system = load_prompt("brain")
     parts: list[str] = []
     if summary:
         parts.append(f"## Tóm tắt hội thoại trước đó\n{summary.strip()}")
+    if workspace_hint:
+        parts.append(workspace_hint.strip())
     recent = _format_messages(messages or [])
     if recent:
         parts.append(f"## Tin nhắn gần đây\n{recent}")
     parts.append(f"## Tin nhắn mới của user\n{user_message}")
     user = "\n\n".join(parts)
-    raw = await run_claude(system, user)
+    raw = await run_claude(system, user, model=settings.brain_model)
     try:
         return parse_decision(raw)
     except Exception as e:

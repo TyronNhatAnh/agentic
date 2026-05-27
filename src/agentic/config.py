@@ -10,6 +10,12 @@ class Settings(BaseSettings):
 
     claude_bin: str = Field(default="claude", alias="CLAUDE_BIN")
     claude_timeout: int = Field(default=300, alias="CLAUDE_TIMEOUT")
+    # Models pinned per role so behavior is deterministic instead of inheriting
+    # whatever the host `claude` CLI defaults to. Aliases (opus/sonnet/haiku) are
+    # resolved by the CLI to its current version of each family.
+    brain_model: str = Field(default="opus", alias="BRAIN_MODEL")
+    dev_model: str = Field(default="opus", alias="DEV_MODEL")
+    agent_model: str = Field(default="sonnet", alias="AGENT_MODEL")
     claude_runtime_dir: str = Field(
         default="/tmp/agentic-runtime", alias="CLAUDE_RUNTIME_DIR"
     )

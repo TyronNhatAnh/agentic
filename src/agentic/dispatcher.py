@@ -169,7 +169,8 @@ async def _shrink_reply(text: str) -> str:
         return text
     try:
         summary = await run_claude(
-            _REPLY_SUMMARY_PROMPT, text, timeout=_REPLY_SUMMARY_TIMEOUT
+            _REPLY_SUMMARY_PROMPT, text, timeout=_REPLY_SUMMARY_TIMEOUT,
+            model=settings.agent_model,
         )
         summary = summary.strip()
     except Exception:
@@ -185,7 +186,8 @@ async def _shrink_dev_reply(text: str) -> str:
         return text
     try:
         summary = await run_claude(
-            _DEV_REPLY_SUMMARY_PROMPT, text, timeout=_REPLY_SUMMARY_TIMEOUT
+            _DEV_REPLY_SUMMARY_PROMPT, text, timeout=_REPLY_SUMMARY_TIMEOUT,
+            model=settings.agent_model,
         )
         return summary.strip()
     except Exception:
@@ -270,7 +272,7 @@ async def _synthesize_action_reply(
         f"### {action_type}\n{output}" for action_type, output in tool_outputs
     )
     blocks.append(f"## Tool outputs\n{rendered_tools}")
-    return await run_claude(system, "\n\n".join(blocks))
+    return await run_claude(system, "\n\n".join(blocks), model=settings.agent_model)
 
 
 async def _prepare_pr_workspace_context(repo: str, pr: str) -> tuple[str | None, str]:
@@ -575,33 +577,78 @@ def _dev_cwd_from_context(
     return None, None
 
 
-async def _dev_workspace_context(thread_row: dict) -> str:
-    """Facts about the active worktree, injected so the dev agent can push + open
-    a PR itself. The *procedure* lives in prompts/dev.md; here we only supply values.
-    """
-    ticket = (thread_row.get("active_ticket") or "").strip()
-    worktree = (thread_row.get("active_worktree") or "").strip()
-    repo = (thread_row.get("repo") or "").strip()
-    branch = f"feature/{ticket}" if ticket else "(branch hiện tại của worktree)"
+_TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+
+
+def _ticket_from_context(text: str, messages: list[dict]) -> str | None:
+    m = _TICKET_RE.search(text)
+    if m:
+        return m.group(1)
+    for msg in reversed(messages):
+        m = _TICKET_RE.search(msg.get("text") or "")
+        if m:
+            return m.group(1)
+    return None
+
+
+async def _resolve_active_workspace(
+    thread_row: dict | None, text: str, prior_messages: list[dict]
+) -> dict | None:
+    """Locate a prepared worktree for the ticket in play, resilient to whether
+    `active_*` was persisted (older prepare runs didn't record it). Resolves the
+    worktree by branch via git, so any on-disk path is found. Returns a dict with
+    ticket/worktree/service/github_repo/base/feature_branch, or None."""
+    ticket = ((thread_row or {}).get("active_ticket") or "").strip()
+    if not ticket:
+        ticket = _ticket_from_context(text, prior_messages) or ""
+    if not ticket:
+        return None
+    slug = ((thread_row or {}).get("repo") or "").strip()
+    slug = slug or _service_slug_from_registry(text, prior_messages) or ""
+    svc = resolve_service_by_github_repo(slug) if slug else None
+    if not svc:
+        return None
+    worktree = await git_int.resolve_existing_worktree(svc, ticket)
+    if not worktree:
+        return None
     base = ""
-    if repo:
-        svc = resolve_service_by_github_repo(repo)
-        if svc:
-            try:
-                base = await git_int._resolve_base_branch(svc)
-            except Exception:
-                log.warning("could not resolve base branch for dev workspace context")
+    try:
+        base = await git_int._resolve_base_branch(svc)
+    except Exception:
+        log.warning("could not resolve base branch for active workspace")
+    return {
+        "ticket": ticket,
+        "worktree": str(worktree),
+        "service": svc["name"],
+        "github_repo": (svc.get("github_repo") or "").strip(),
+        "base": base,
+        "feature_branch": f"feature/{ticket}",
+    }
+
+
+def _workspace_brain_hint(ws: dict) -> str:
+    """Tell the brain a worktree is ready so it routes fix/PR work to dev."""
+    return (
+        "## Workspace đang mở\n"
+        f"Thread này đã có worktree sẵn cho ticket `{ws['ticket']}` "
+        f"(service `{ws['service']}`, branch `{ws['feature_branch']}`). "
+        "Nếu user muốn fix/sửa/commit/push/tạo PR cho ticket này → trả 1 `dev` step "
+        "(dev sẽ tự edit, commit, push, mở PR rồi báo link)."
+    )
+
+
+def _workspace_context_block(ws: dict) -> str:
+    """Facts injected into the dev agent run (procedure lives in prompts/dev.md)."""
     lines = [
         "## Workspace (bạn đang đứng ở đây)",
-        f"- Worktree (cwd của bạn): `{worktree}`",
-        f"- Branch: `{branch}`",
+        f"- Worktree (cwd của bạn): `{ws['worktree']}`",
+        f"- Branch: `{ws['feature_branch']}`",
     ]
-    if repo:
-        lines.append(f"- Repo GitHub: `{repo}`")
-    if base:
-        lines.append(f"- Base branch để mở PR: `{base}`")
-    if ticket:
-        lines.append(f"- Ticket: `{ticket}`")
+    if ws.get("github_repo"):
+        lines.append(f"- Repo GitHub: `{ws['github_repo']}`")
+    if ws.get("base"):
+        lines.append(f"- Base branch để mở PR: `{ws['base']}`")
+    lines.append(f"- Ticket: `{ws['ticket']}`")
     return "\n".join(lines)
 
 
@@ -692,10 +739,23 @@ async def handle_message(
         # so we don't leak it into the next turn.
         clear_pending_confirmation(thread_ts)
 
+    # Resolve any worktree already prepared for the ticket in play. Used both to
+    # nudge the brain (route fix/PR to dev) and to run dev inside that worktree.
+    workspace = await _resolve_active_workspace(thread_row, text, prior_messages)
+    if workspace and thread_ts:
+        fields = {
+            "active_ticket": workspace["ticket"],
+            "active_worktree": workspace["worktree"],
+        }
+        if workspace.get("github_repo") and not (thread_row or {}).get("repo"):
+            fields["repo"] = workspace["github_repo"]
+        update_thread_fields(thread_ts, **fields)
+
     started = time.time()
     try:
         decision: BrainDecision = await decide(
-            text, summary=summary, messages=prior_messages
+            text, summary=summary, messages=prior_messages,
+            workspace_hint=_workspace_brain_hint(workspace) if workspace else None,
         )
         tool_count += 1
     except Exception as e:
@@ -766,10 +826,9 @@ async def handle_message(
                 context_for_step = _dev_context_for_step(prior_output, prior_messages)
                 # A worktree prepared earlier in this thread wins: the dev agent
                 # must edit (and push/PR) inside it, not in the shared clone.
-                active_wt = ((thread_row or {}).get("active_worktree") or "").strip()
-                if active_wt and Path(active_wt).is_dir():
-                    dev_cwd = active_wt
-                    ws_ctx = await _dev_workspace_context(thread_row)
+                if workspace and Path(workspace["worktree"]).is_dir():
+                    dev_cwd = workspace["worktree"]
+                    ws_ctx = _workspace_context_block(workspace)
                     context_for_step = (
                         f"{ws_ctx}\n\n---\n{context_for_step}"
                         if context_for_step else ws_ctx

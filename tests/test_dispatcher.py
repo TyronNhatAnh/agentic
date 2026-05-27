@@ -15,7 +15,7 @@ def _db(monkeypatch):
     monkeypatch.setattr(dispatcher, "maybe_schedule_summary", lambda thread_ts: None)
 
 
-async def _fake_decide(message, *, summary=None, messages=None):
+async def _fake_decide(message, *, summary=None, messages=None, workspace_hint=None):
     return BrainDecision(
         reply=None,
         steps=[Step(agent="ba", task="write user story for: " + message)],
@@ -61,7 +61,7 @@ async def test_subagents_append_prompts_to_claude_code_default(monkeypatch):
 
 
 async def test_dispatcher_clarification(monkeypatch):
-    async def clarify(msg, *, summary=None, messages=None):
+    async def clarify(msg, *, summary=None, messages=None, workspace_hint=None):
         return BrainDecision(need_clarification=True, clarify_question="Which repo?")
 
     monkeypatch.setattr(dispatcher, "decide", clarify)
@@ -75,7 +75,7 @@ async def test_dispatcher_auto_reviews_fetched_pr_diff(monkeypatch):
     diff = "*PR #431 `gogovan/ggx-kr-user-service` diff*:\n```diff\n+new code\n```"
     seen = {}
 
-    async def decide_review_pr(msg, *, summary=None, messages=None):
+    async def decide_review_pr(msg, *, summary=None, messages=None, workspace_hint=None):
         return BrainDecision(
             reply=None,
             actions=[
@@ -138,7 +138,7 @@ async def test_dispatcher_fixes_fetched_pr_diff_in_local_workspace(monkeypatch):
     diff = "*PR #431 `gogovan/ggx-kr-user-service` diff*:\n```diff\n+buggy code\n```"
     seen = {}
 
-    async def decide_fix_pr(msg, *, summary=None, messages=None):
+    async def decide_fix_pr(msg, *, summary=None, messages=None, workspace_hint=None):
         return BrainDecision(
             reply=None,
             actions=[
@@ -205,7 +205,7 @@ async def test_dev_first_step_receives_thread_analysis_context(monkeypatch):
         "app/services/order_service.rb:74, tránh race condition lock."
     )
 
-    async def decide_dev(msg, *, summary=None, messages=None):
+    async def decide_dev(msg, *, summary=None, messages=None, workspace_hint=None):
         return BrainDecision(
             reply=None,
             steps=[Step(agent="dev", task="fix race condition lock")],
@@ -364,7 +364,7 @@ def test_bare_repo_resolution_rejects_ambiguous_matches(tmp_path):
 async def test_dispatcher_synthesizes_read_action_outputs(monkeypatch):
     seen = {}
 
-    async def decide_get_issue(msg, *, summary=None, messages=None):
+    async def decide_get_issue(msg, *, summary=None, messages=None, workspace_hint=None):
         return BrainDecision(
             reply=None,
             actions=[Action(type="jira.get_issue", payload={"key": "KRP-123"})],
@@ -411,7 +411,7 @@ def test_has_log_output_only_for_loki():
 async def test_synthesize_injects_grounding_rules_for_logs(monkeypatch):
     captured = {}
 
-    async def fake_run_claude(system, user):
+    async def fake_run_claude(system, user, **kwargs):
         captured["system"] = system
         return "ok"
 

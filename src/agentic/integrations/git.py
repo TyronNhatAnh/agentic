@@ -57,16 +57,38 @@ def worktree_path_for(svc: dict, ticket: str) -> Path:
     return (Path(repo_path).resolve() / ".worktrees" / ticket)
 
 
-async def _worktree_registered(repo_path: str, worktree_path: Path) -> bool:
-    """Authoritative check via `git worktree list` (not a filesystem guess)."""
+async def find_worktree_for_branch(repo_path: str, branch: str) -> Path | None:
+    """Locate an existing worktree checked out on `branch`, at whatever path.
+
+    Resolving by branch (not by a recomputed path) means the worktree is still
+    found after the path scheme changes, or if it was created by an older build.
+    Returns the worktree path, or None if no worktree holds that branch.
+    """
     rc, out, _ = await _run_git("worktree", "list", "--porcelain", cwd=repo_path)
     if rc != 0:
-        return worktree_path.is_dir() and Path(worktree_path, ".git").exists()
-    target = str(worktree_path.resolve())
+        return None
+    target = f"refs/heads/{branch}"
+    current: str | None = None
     for line in out.splitlines():
-        if line.startswith("worktree ") and Path(line[len("worktree "):]).resolve() == Path(target):
-            return True
-    return False
+        if line.startswith("worktree "):
+            current = line[len("worktree "):]
+        elif line == f"branch {target}" and current:
+            return Path(current)
+    return None
+
+
+async def resolve_existing_worktree(svc: dict, ticket: str) -> Path | None:
+    """Find the worktree for a ticket: by branch first (any path), then the
+    canonical path. Returns None if none exists on disk."""
+    repo_path = (svc.get("repo_path") or "").strip()
+    if repo_path:
+        found = await find_worktree_for_branch(repo_path, f"feature/{ticket}")
+        if found and found.is_dir():
+            return found
+    canonical = worktree_path_for(svc, ticket)
+    if canonical.is_dir() and Path(canonical, ".git").exists():
+        return canonical
+    return None
 
 
 async def check_repo(service: str | None = None, repo: str | None = None) -> ToolResult:
@@ -182,6 +204,27 @@ async def prepare_workspace(service: str, ticket: str,
     except Exception as e:
         return classify_exception(e, service="Jira")
 
+    feature_branch = f"feature/{ticket}"
+
+    # 2b. If a worktree for this ticket already exists (any path, incl. ones made
+    # by an older build), reuse it — never recreate or ask about base.
+    existing = await find_worktree_for_branch(repo_path, feature_branch)
+    if existing and existing.is_dir():
+        return ToolResult.success(
+            {
+                "service": svc["name"],
+                "github_repo": (svc.get("github_repo") or "").strip(),
+                "ticket": ticket,
+                "base": base,
+                "feature_branch": feature_branch,
+                "worktree_path": str(existing),
+                "message": (
+                    f"📂 Worktree đã có sẵn tại `{existing}` "
+                    f"(branch `{feature_branch}`). Vào đó code tiếp nha."
+                ),
+            }
+        )
+
     # 3. Check base exists locally or on origin
     local_has = await _branch_exists(repo_path, base)
     remote_has = await _branch_exists(repo_path, f"origin/{base}")
@@ -219,26 +262,8 @@ async def prepare_workspace(service: str, ticket: str,
             ),
         )
 
-    # 4. Create worktree
+    # 4. Create worktree at the canonical path (no existing one — checked in 2b).
     worktree_path = worktree_path_for(svc, ticket)
-    feature_branch = f"feature/{ticket}"
-
-    if await _worktree_registered(repo_path, worktree_path):
-        return ToolResult.success(
-            {
-                "service": svc["name"],
-                "github_repo": (svc.get("github_repo") or "").strip(),
-                "ticket": ticket,
-                "base": base,
-                "feature_branch": feature_branch,
-                "worktree_path": str(worktree_path),
-                "message": (
-                    f"📂 Worktree đã có sẵn tại `{worktree_path}` "
-                    f"(branch `{feature_branch}`). Vào đó code tiếp nha."
-                ),
-            }
-        )
-
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
     # If feature branch already exists, reuse it; else create from origin/base.
@@ -287,11 +312,11 @@ async def commit_branch(service: str, ticket: str, message: str,
         return ToolResult.failure(
             "NOT_FOUND", f"Không tìm thấy service `{service}` trong mapping."
         )
-    worktree_path = worktree_path_for(svc, ticket)
-    if not worktree_path.is_dir() or not Path(worktree_path, ".git").exists():
+    worktree_path = await resolve_existing_worktree(svc, ticket)
+    if not worktree_path:
         return ToolResult.failure(
             "NOT_FOUND",
-            f"Chưa có worktree `{worktree_path}`. Chạy `git.prepare_workspace` trước.",
+            f"Chưa có worktree cho `feature/{ticket}`. Chạy `git.prepare_workspace` trước.",
         )
 
     rc, status, err = await _run_git("status", "--porcelain", cwd=str(worktree_path))
@@ -344,11 +369,11 @@ async def push_branch(service: str, ticket: str,
         return ToolResult.failure(
             "NOT_FOUND", f"Không tìm thấy service `{service}` trong mapping."
         )
-    worktree_path = worktree_path_for(svc, ticket)
-    if not worktree_path.is_dir() or not Path(worktree_path, ".git").exists():
+    worktree_path = await resolve_existing_worktree(svc, ticket)
+    if not worktree_path:
         return ToolResult.failure(
             "NOT_FOUND",
-            f"Chưa có worktree `{worktree_path}`. Chạy `git.prepare_workspace` trước.",
+            f"Chưa có worktree cho `feature/{ticket}`. Chạy `git.prepare_workspace` trước.",
         )
     feature_branch = f"feature/{ticket}"
 
