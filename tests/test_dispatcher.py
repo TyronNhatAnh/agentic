@@ -198,6 +198,47 @@ async def test_dispatcher_fixes_fetched_pr_diff_in_local_workspace(monkeypatch):
     assert "Fix request" in seen["task"]
 
 
+async def test_dev_first_step_receives_thread_analysis_context(monkeypatch):
+    seen = {}
+    analysis = (
+        "Phân tích fix đã chốt: dùng Redis SET NX EX ở "
+        "app/services/order_service.rb:74, tránh race condition lock."
+    )
+
+    async def decide_dev(msg, *, summary=None, messages=None):
+        return BrainDecision(
+            reply=None,
+            steps=[Step(agent="dev", task="fix race condition lock")],
+            raw="(mocked)",
+        )
+
+    async def fake_run_dev(task, context="", cwd=None, apply_changes=False):
+        seen["task"] = task
+        seen["context"] = context
+        seen["cwd"] = cwd
+        seen["apply_changes"] = apply_changes
+        return "Đã sửa lock"
+
+    monkeypatch.setattr(dispatcher, "decide", decide_dev)
+    monkeypatch.setattr(dispatcher, "_run_dev_direct", fake_run_dev)
+
+    out = await dispatcher.handle_message(
+        "ok fix",
+        thread_ts="t-dev-context",
+        channel="C1",
+        user_id="U1",
+        thread_history=[
+            {"role": "assistant", "text": analysis},
+            {"role": "user", "text": "ok fix"},
+        ],
+    )
+
+    assert "[dev]" in out
+    assert "app/services/order_service.rb:74" in seen["context"]
+    assert "Redis SET NX EX" in seen["context"]
+    assert seen["task"] == "fix race condition lock"
+
+
 async def test_dispatcher_checks_local_repo_status_without_jira_ticket(monkeypatch):
     seen = {}
 
@@ -249,6 +290,75 @@ def test_seeded_service_resolves_by_github_repo():
 
     assert svc is not None
     assert svc["name"] == "ggx-kr-user-service"
+
+
+def test_dev_cwd_explicit_current_repo_beats_thread_history(tmp_path):
+    repo_a = tmp_path / "service-a"
+    repo_b = tmp_path / "service-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    with connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO service_repos(name, repo_path, github_repo, "
+            "base_branch_template, jira_board_id, aliases) VALUES (?, ?, ?, ?, ?, ?)",
+            ("svc-a", str(repo_a), "gogovan/service-a", "", 0, '["service-a"]'),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO service_repos(name, repo_path, github_repo, "
+            "base_branch_template, jira_board_id, aliases) VALUES (?, ?, ?, ?, ?, ?)",
+            ("svc-b", str(repo_b), "gogovan/service-b", "", 0, '["service-b"]'),
+        )
+
+    slug, path = dispatcher._dev_cwd_from_context(
+        {"repo": "gogovan/service-a"},
+        text="fix https://github.com/gogovan/service-b/pull/9",
+        prior_messages=[{"role": "assistant", "text": "Earlier analysis for service-a"}],
+    )
+
+    assert slug == "gogovan/service-b"
+    assert path == str(repo_b)
+
+
+def test_dev_cwd_explicit_unknown_repo_does_not_fallback_to_history(tmp_path):
+    repo_a = tmp_path / "service-a"
+    repo_a.mkdir()
+    with connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO service_repos(name, repo_path, github_repo, "
+            "base_branch_template, jira_board_id, aliases) VALUES (?, ?, ?, ?, ?, ?)",
+            ("svc-a", str(repo_a), "gogovan/service-a", "", 0, '["service-a"]'),
+        )
+
+    slug, path = dispatcher._dev_cwd_from_context(
+        {"repo": "gogovan/service-a"},
+        text="fix https://github.com/gogovan/unknown-service/pull/9",
+        prior_messages=[{"role": "assistant", "text": "Earlier analysis for service-a"}],
+    )
+
+    assert slug is None
+    assert path is None
+
+
+def test_bare_repo_resolution_rejects_ambiguous_matches(tmp_path):
+    repo_a = tmp_path / "owner-a-same-service"
+    repo_b = tmp_path / "owner-b-same-service"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    with connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO service_repos(name, repo_path, github_repo, "
+            "base_branch_template, jira_board_id, aliases) VALUES (?, ?, ?, ?, ?, ?)",
+            ("same-service-a", str(repo_a), "owner-a/same-service", "", 0, "[]"),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO service_repos(name, repo_path, github_repo, "
+            "base_branch_template, jira_board_id, aliases) VALUES (?, ?, ?, ?, ?, ?)",
+            ("same-service-b", str(repo_b), "owner-b/same-service", "", 0, "[]"),
+        )
+
+    assert resolve_service_by_github_repo("owner-b/same-service")["name"] == "same-service-b"
+    with pytest.raises(ValueError, match="ambiguous"):
+        resolve_service_by_github_repo("same-service")
 
 
 async def test_dispatcher_synthesizes_read_action_outputs(monkeypatch):

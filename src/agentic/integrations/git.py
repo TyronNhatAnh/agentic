@@ -41,7 +41,10 @@ async def check_repo(service: str | None = None, repo: str | None = None) -> Too
     """Read-only check for local service repository mapping and checkout status."""
     svc = None
     if repo:
-        svc = resolve_service_by_github_repo(repo)
+        try:
+            svc = resolve_service_by_github_repo(repo)
+        except ValueError as e:
+            return ToolResult.failure("VALIDATION", str(e))
     if not svc and service:
         svc = resolve_service(service)
     if not svc:
@@ -320,7 +323,10 @@ async def push_branch(service: str, ticket: str,
 
 async def prepare_pr_review_workspace(repo: str, pr: int) -> ToolResult:
     """Create or update a detached local worktree at the PR head for review."""
-    svc = resolve_service_by_github_repo(repo)
+    try:
+        svc = resolve_service_by_github_repo(repo)
+    except ValueError as e:
+        return ToolResult.failure("VALIDATION", str(e))
     if not svc:
         return ToolResult.failure(
             "NOT_FOUND",

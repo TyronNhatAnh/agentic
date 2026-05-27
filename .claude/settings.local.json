@@ -87,7 +87,9 @@
       "Bash(sqlite3 agentic.db \"SELECT name, repo_path, github_repo, base_branch_template FROM service_repos WHERE name LIKE '%da-api%' OR github_repo LIKE '%da-api%';\")",
       "Bash(git -C /Users/tyron/Projects/agentic branch --show-current)",
       "Bash(git -C /Users/tyron/Projects/agentic status --porcelain)",
-      "Bash(git -C /Users/tyron/Projects/agentic status --short)"
+      "Bash(git -C /Users/tyron/Projects/agentic status --short)",
+      "Bash(.venv/bin/pytest tests/test_brain_routing.py -q)",
+      "Bash(.venv/bin/pytest tests/test_dispatcher.py tests/test_brain_routing.py -q)"
     ],
     "deny": [
       "Read(//Users/tyron/Projects/agentic/.env)",

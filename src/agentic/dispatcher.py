@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 import time
@@ -8,6 +9,7 @@ from .agents import REGISTRY
 from .agents.dev import run_dev as _run_dev_direct
 from .agents.base import run_claude
 from .brain import Action, BrainDecision, decide
+from .brain import _format_messages as _format_thread_messages
 from .config import settings
 from .integrations import git as git_int
 from .integrations import github, grafana, jira
@@ -18,6 +20,7 @@ from .store import (
     clear_pending_confirmation,
     get_pending_confirmation,
     get_thread,
+    list_services,
     log_run,
     recent_messages,
     resolve_service_by_github_repo,
@@ -120,6 +123,10 @@ def _looks_like_local_repo_status_question(text: str) -> bool:
 
 def _repo_from_text_or_history(text: str, messages: list[dict]) -> str | None:
     haystacks = [text] + [m.get("text") or "" for m in reversed(messages)]
+    return _repo_from_haystacks(haystacks) or settings.github_default_repo
+
+
+def _repo_from_haystacks(haystacks: list[str]) -> str | None:
     for item in haystacks:
         match = _GITHUB_PR_RE.search(item)
         if match:
@@ -128,7 +135,11 @@ def _repo_from_text_or_history(text: str, messages: list[dict]) -> str | None:
         match = _REPO_SLUG_RE.search(item)
         if match:
             return match.group(1)
-    return settings.github_default_repo or None
+    return None
+
+
+def _repo_from_text_only(text: str) -> str | None:
+    return _repo_from_haystacks([text])
 
 # Reply gửi lên Slack nên rất ngắn: chỉ kết luận + link/keys + next step.
 _REPLY_SAFE_LEN = 2500
@@ -483,6 +494,44 @@ async def _run_pending(
     return display
 
 
+def _service_slug_from_registry_text(text: str) -> str | None:
+    """Find a registered service mentioned by bare name/alias in text.
+
+    Returns the service's github_repo slug (or canonical name) so downstream
+    resolution and thread.repo persistence stay slug-shaped. Only matches keys
+    containing a hyphen (canonical names, `ggx-kr-*` aliases, github repo tails)
+    so short generic aliases like "order"/"user" don't hijack a free-text match.
+    """
+    haystack = text.lower()
+    tokens = set(re.findall(r"[a-z0-9][a-z0-9_.-]*", haystack))
+    if not tokens:
+        return None
+    for svc in list_services():
+        keys = {(svc.get("name") or "").lower()}
+        gh = (svc.get("github_repo") or "").strip().lower()
+        if gh:
+            keys.add(gh.rsplit("/", 1)[-1])
+        try:
+            keys.update(a.lower() for a in json.loads(svc.get("aliases") or "[]"))
+        except (json.JSONDecodeError, TypeError):
+            pass
+        keys = {k for k in keys if "-" in k}
+        if keys & tokens:
+            return gh or (svc.get("name") or None)
+    return None
+
+
+def _service_slug_from_registry(text: str, messages: list[dict]) -> str | None:
+    current = _service_slug_from_registry_text(text)
+    if current:
+        return current
+    for msg in reversed(messages):
+        found = _service_slug_from_registry_text(msg.get("text") or "")
+        if found:
+            return found
+    return None
+
+
 def _dev_cwd_from_context(
     thread_row: dict | None,
     text: str = "",
@@ -491,18 +540,32 @@ def _dev_cwd_from_context(
     """Resolve (repo_slug, local_path) for the dev agent.
 
     Tries, in order:
-      1. thread.repo field (already persisted)
-      2. Parsing from current text + message history
+      1. Explicit repo/PR slug in the current message — wins over everything so a
+         concrete request never gets routed to a stale thread repo.
+      2. thread.repo field (already persisted), only if no explicit slug.
+      3. Bare service name/alias scanned from the registry, then repo/PR parsed
+         from message history (or the default repo) — only when (1) found nothing.
     Returns (None, None) if no local mapping found.
     """
     candidates: list[str] = []
-    if thread_row:
+    explicit = _repo_from_text_only(text)
+    if explicit:
+        candidates.append(explicit)
+    elif thread_row:
         slug = (thread_row.get("repo") or "").strip()
         if slug:
             candidates.append(slug)
-    inferred = _repo_from_text_or_history(text, prior_messages or [])
-    if inferred and inferred not in candidates:
-        candidates.append(inferred)
+    if not explicit:
+        # Bare service name/alias (no owner prefix, e.g. "ggx-kr-da-api") — the
+        # slug regex needs a "/", so scan the registry only after ruling out an
+        # explicit repo in the current message. Never fall back to an old thread
+        # repo when the user just gave a concrete repo/PR.
+        scanned = _service_slug_from_registry(text, prior_messages or [])
+        if scanned and scanned not in candidates:
+            candidates.append(scanned)
+        inferred = _repo_from_text_or_history(text, prior_messages or [])
+        if inferred and inferred not in candidates:
+            candidates.append(inferred)
     for slug in candidates:
         svc = resolve_service_by_github_repo(slug)
         if svc:
@@ -510,6 +573,21 @@ def _dev_cwd_from_context(
             if path and Path(path).is_dir():
                 return slug, path
     return None, None
+
+
+def _dev_context_for_step(prior_output: str, prior_messages: list[dict]) -> str:
+    if prior_output:
+        context, _ = _truncate(
+            prior_output, settings.max_context_chars, label="context"
+        )
+        return context
+    thread_context = _format_thread_messages(prior_messages)
+    if not thread_context:
+        return ""
+    context, _ = _truncate(
+        thread_context, settings.dev_context_chars, label="dev context"
+    )
+    return context
 
 
 async def handle_message(
@@ -652,11 +730,9 @@ async def handle_message(
         output: str | None = None
         status = "error"
         err: str | None = None
-        context_for_step, _ = _truncate(
-            prior_output, settings.max_context_chars, label="context"
-        )
         try:
             if step.agent == "dev":
+                context_for_step = _dev_context_for_step(prior_output, prior_messages)
                 dev_slug, dev_cwd = _dev_cwd_from_context(
                     thread_row if thread_ts else None,
                     text=text,
@@ -671,6 +747,9 @@ async def handle_message(
                     apply_changes=bool(dev_cwd),
                 )
             else:
+                context_for_step, _ = _truncate(
+                    prior_output, settings.max_context_chars, label="context"
+                )
                 output = await runner(step.task, context=context_for_step)
             status = "ok"
         except Exception as e:

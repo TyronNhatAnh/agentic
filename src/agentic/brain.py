@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .agents.base import load_prompt, run_claude
+from .config import settings
 
 log = logging.getLogger(__name__)
 
@@ -68,13 +69,14 @@ def _format_messages(messages: list[dict]) -> str:
     if not messages:
         return ""
     lines = []
-    budget = 12000
+    budget = settings.brain_history_budget_chars
+    msg_cap = settings.brain_history_msg_cap_chars
     for m in messages:
         role = m.get("role", "?")
         text = (m.get("text") or "").strip()
         line = f"{role}: {text}"
-        if len(line) > 2500:
-            line = line[:2400] + f"\n…[message cắt bớt {len(line) - 2400} ký tự]"
+        if len(line) > msg_cap:
+            line = line[:msg_cap] + f"\n…[message cắt bớt {len(line) - msg_cap} ký tự]"
         if sum(len(existing) for existing in lines) + len(line) > budget:
             remaining = max(0, budget - sum(len(existing) for existing in lines))
             if remaining > 200:

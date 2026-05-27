@@ -309,17 +309,55 @@ def resolve_service(name_or_alias: str) -> dict | None:
 
 
 def resolve_service_by_github_repo(repo: str) -> dict | None:
-    """Match a GitHub repo slug to a configured local service."""
+    """Match a GitHub repo slug to a configured local service.
+
+    Accepts a full slug (`owner/repo`), a bare repo name (`ggx-kr-da-api`), the
+    canonical service name, or any configured alias — so a user typing the repo
+    name without the owner prefix still resolves to the local clone. Full slugs
+    must match exactly; bare names must resolve to exactly one service.
+    """
     normalized = repo.strip().lower()
+    if not normalized:
+        return None
+    has_owner = "/" in normalized
     repo_name = normalized.rsplit("/", 1)[-1]
     with connect() as conn:
         rows = conn.execute("SELECT * FROM service_repos").fetchall()
+    matches: list[dict] = []
     for r in rows:
         d = dict(r)
         github_repo = (d.get("github_repo") or "").strip().lower()
-        if github_repo and github_repo == normalized:
-            return d
-        if d["name"].lower() == repo_name:
+        if has_owner:
+            if github_repo and github_repo == normalized:
+                return d
+            continue
+        if github_repo and github_repo.rsplit("/", 1)[-1] == repo_name:
+            matches.append(d)
+            continue
+        if d["name"].lower() in (normalized, repo_name):
+            matches.append(d)
+            continue
+        try:
+            aliases = json.loads(d.get("aliases") or "[]")
+        except json.JSONDecodeError:
+            aliases = []
+        if any(str(a).lower() in (normalized, repo_name) for a in aliases):
+            matches.append(d)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        names = ", ".join(
+            (m.get("github_repo") or m["name"]) for m in matches[:5]
+        )
+        more = f", ... (+{len(matches) - 5})" if len(matches) > 5 else ""
+        raise ValueError(
+            f"repo/service `{repo}` ambiguous: {names}{more}. Use full owner/repo."
+        )
+    # Backward-compatible fallback: service name may be the full input even when
+    # it contains a slash-like namespace string but github_repo is not populated.
+    for r in rows:
+        d = dict(r)
+        if d["name"].lower() == normalized:
             return d
     return None
 

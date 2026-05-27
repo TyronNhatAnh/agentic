@@ -48,6 +48,16 @@ class Settings(BaseSettings):
     max_actions: int = Field(default=5, alias="MAX_ACTIONS")
     max_input_chars: int = Field(default=16000, alias="MAX_INPUT_CHARS")
     max_context_chars: int = Field(default=8000, alias="MAX_CONTEXT_CHARS")
+    dev_context_chars: int = Field(default=16000, alias="DEV_CONTEXT_CHARS")
+    # Brain thread-history budget. Defaults are generous so an earlier in-thread
+    # analysis the bot itself produced survives into the brain's view instead of
+    # being truncated before it can be reused as a fix spec.
+    brain_history_budget_chars: int = Field(
+        default=60000, alias="BRAIN_HISTORY_BUDGET_CHARS"
+    )
+    brain_history_msg_cap_chars: int = Field(
+        default=12000, alias="BRAIN_HISTORY_MSG_CAP_CHARS"
+    )
 
     slack_allowed_channels: str = Field(default="", alias="SLACK_ALLOWED_CHANNELS")
 
