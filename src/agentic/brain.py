@@ -105,7 +105,16 @@ async def decide(
         parts.append(f"## Tin nhắn gần đây\n{recent}")
     parts.append(f"## Tin nhắn mới của user\n{user_message}")
     if tool_results:
-        formatted = "\n\n---\n".join(tool_results)
+        per_cap = settings.max_context_chars
+        total_cap = per_cap * 4
+        capped = []
+        for r in tool_results:
+            if len(r) > per_cap:
+                r = r[:per_cap] + f"\n…[cắt bớt {len(r) - per_cap} ký tự]…"
+            capped.append(r)
+        formatted = "\n\n---\n".join(capped)
+        if len(formatted) > total_cap:
+            formatted = formatted[:total_cap] + f"\n…[tool results cắt bớt]…"
         parts.append(f"## Kết quả công cụ vừa chạy\n{formatted}")
     user = "\n\n".join(parts)
     raw = await run_claude(system, user, model=settings.brain_model)

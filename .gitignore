@@ -49,3 +49,5 @@ Thumbs.db
 
 # Internal service registry (infra-specific, like .env)
 services.json
+agentic.db-shm
+agentic.db-wal
