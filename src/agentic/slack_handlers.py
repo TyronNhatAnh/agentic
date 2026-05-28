@@ -218,6 +218,8 @@ def register(app: AsyncApp, runner: JobRunner) -> None:
     async def _is_allowed(client, channel_id: str) -> bool:
         if not allowed:
             return True
+        if channel_id in allowed:
+            return True
         name = await _channel_name(client, channel_id)
         return name in allowed if name else False
 
@@ -290,5 +292,5 @@ def register(app: AsyncApp, runner: JobRunner) -> None:
 
     @app.event("message")
     async def on_message(event, client):
-        # DM disabled by policy; ignore everything that isn't an app_mention.
+        # Mention required everywhere; non-mention messages are ignored.
         return

@@ -121,11 +121,20 @@ async def decide(
     try:
         return parse_decision(raw)
     except Exception as e:
-        log.error(
-            "brain JSON parse failed: %s; raw_head=%r",
-            e,
-            raw[:500],
+        log.warning("brain JSON parse failed (attempt 1): %s; raw_head=%r", e, raw[:200])
+        # Retry: wrap the prose output back into a JSON reply.
+        retry_user = (
+            user
+            + "\n\n---\nOutput của bạn vừa rồi không phải JSON hợp lệ.\n"
+            "Hãy wrap nội dung đó vào đúng format JSON:\n"
+            '{"reply": "<nội dung đó>", "need_clarification": false, "clarify_question": null, "steps": [], "actions": []}'
         )
+        raw2 = ""
+        try:
+            raw2 = await run_claude(system, retry_user, model=settings.brain_model)
+            return parse_decision(raw2)
+        except Exception as e2:
+            log.error("brain JSON parse failed (attempt 2): %s; raw_head=%r", e2, raw2[:500])
         fallback = (
             "⚠️ Brain trả response không phải JSON hợp lệ; bot không chạy step/action nào.\n"
             "Raw model output:\n" + raw

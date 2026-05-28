@@ -70,11 +70,18 @@ class Settings(BaseSettings):
 
     @property
     def allowed_channel_names(self) -> set[str]:
-        return {
-            name.strip().lstrip("#").lower()
-            for name in self.slack_allowed_channels.split(",")
-            if name.strip()
-        }
+        """Returns lowercase names and raw IDs (e.g. D0XXXXXX) from SLACK_ALLOWED_CHANNELS."""
+        result = set()
+        for entry in self.slack_allowed_channels.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            # Channel IDs (C.../D.../G...) are kept as-is (uppercase); names are lowercased
+            if entry and entry[0].isupper() and entry.isalnum():
+                result.add(entry)
+            else:
+                result.add(entry.lstrip("#").lower())
+        return result
 
 
 settings = Settings()

@@ -389,9 +389,15 @@ async def push_branch(service: str, ticket: str,
         }
         return res
 
-    rc, _, err = await _run_git(
-        "push", "-u", "origin", feature_branch, cwd=str(worktree_path)
-    )
+    push_url = "origin"
+    token = settings.github_token
+    if token:
+        _, remote_url, _ = await _run_git("remote", "get-url", "origin", cwd=str(worktree_path))
+        if remote_url.startswith("git@github.com:"):
+            repo_path_part = remote_url[len("git@github.com:"):]
+            push_url = f"https://x-access-token:{token}@github.com/{repo_path_part}"
+
+    rc, _, err = await _run_git("push", "-u", push_url, feature_branch, cwd=str(worktree_path))
     if rc != 0:
         return ToolResult.failure("GIT_PUSH", f"git push lỗi: {err[:300]}")
     return ToolResult.success(f"✅ Pushed `{feature_branch}` lên origin.")
