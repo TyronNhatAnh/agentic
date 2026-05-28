@@ -100,7 +100,8 @@
       "Bash(rm -f /tmp/stuckfifo)",
       "Bash(git push *)",
       "Bash(git config *)",
-      "Bash(ps -p 9079 -o pid,lstart,etime,command)"
+      "Bash(ps -p 9079 -o pid,lstart,etime,command)",
+      "Bash(claude -p \"Reply with just: ok\" --system-prompt \"You are a test.\" --output-format json)"
     ],
     "deny": [
       "Read(//Users/tyron/Projects/agentic/.env)",

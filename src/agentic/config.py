@@ -50,8 +50,9 @@ class Settings(BaseSettings):
 
     worker_concurrency: int = Field(default=4, alias="WORKER_CONCURRENCY")
 
-    max_steps: int = Field(default=5, alias="MAX_STEPS")
-    max_actions: int = Field(default=5, alias="MAX_ACTIONS")
+    max_steps: int = Field(default=20, alias="MAX_STEPS")
+    max_actions: int = Field(default=20, alias="MAX_ACTIONS")
+    brain_max_iterations: int = Field(default=4, alias="BRAIN_MAX_ITERATIONS")
     max_input_chars: int = Field(default=16000, alias="MAX_INPUT_CHARS")
     max_context_chars: int = Field(default=8000, alias="MAX_CONTEXT_CHARS")
     dev_context_chars: int = Field(default=16000, alias="DEV_CONTEXT_CHARS")

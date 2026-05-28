@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .agents import REGISTRY
 from .agents.dev import run_dev as _run_dev_direct
-from .agents.base import run_claude
+from .agents.base import run_claude, _usage_tracker
 from .brain import Action, BrainDecision, decide
 from .brain import _format_messages as _format_thread_messages
 from .config import settings
@@ -52,6 +52,7 @@ def _is_affirmative(text: str) -> bool:
 def _is_negative(text: str) -> bool:
     return _normalize_reply(text) in _NEGATIVE
 from .summarizer import maybe_schedule as maybe_schedule_summary
+from .worker import ReplyFn
 
 log = logging.getLogger(__name__)
 
@@ -76,9 +77,26 @@ _MAX_RETRIES = 2
 _RETRY_BACKOFF_S = (0.5, 1.5)
 
 
+async def _progress(fn: ReplyFn | None, msg: str) -> None:
+    if fn:
+        try:
+            await fn(msg)
+        except Exception:
+            log.debug("progress update failed: %s", msg)
+
+
 def _footer(tool_count: int, elapsed_s: float) -> str:
     plural = "s" if tool_count != 1 else ""
-    return f"_🛠️ {tool_count} tool{plural} · {elapsed_s:.1f}s_"
+    base = f"_🛠️ {tool_count} tool{plural} · {elapsed_s:.1f}s"
+    tracker = _usage_tracker.get(None)
+    if tracker:
+        in_tok = sum(u.get("total_input_tokens", 0) for u in tracker)
+        out_tok = sum(u.get("total_output_tokens", 0) for u in tracker)
+        cost = sum(u.get("cost_usd") or 0.0 for u in tracker)
+        base += f" · {in_tok // 1000}k/{out_tok // 1000}k tok"
+        if cost > 0:
+            base += f" · ${cost:.3f}"
+    return base + "_"
 
 
 def _with_footer(reply: str, tool_count: int, t_start: float) -> str:
@@ -687,9 +705,12 @@ async def handle_message(
     channel: str | None,
     user_id: str | None,
     thread_history: list[dict] | None = None,
+    progress: ReplyFn | None = None,
 ) -> str:
     t_start = time.time()
     tool_count = 0
+    _call_usage: list[dict] = []
+    _usage_tracker.set(_call_usage)
     text, input_truncated = _truncate(text, settings.max_input_chars, label="input")
     summary: str | None = None
     prior_messages: list[dict] = []
@@ -764,6 +785,7 @@ async def handle_message(
             fields["repo"] = workspace["github_repo"]
         update_thread_fields(thread_ts, **fields)
 
+    await _progress(progress, "🧠 Brain đang phân tích...")
     started = time.time()
     try:
         decision: BrainDecision = await decide(
@@ -807,184 +829,249 @@ async def handle_message(
         result.errors.append(
             f"input quá dài, đã cắt còn {settings.max_input_chars} ký tự"
         )
-    if decision.reply and decision.reply.strip().lower() not in {"null", "none"}:
-        result.add(decision.reply)
 
-    steps = decision.steps[: settings.max_steps]
-    if len(decision.steps) > settings.max_steps:
-        result.errors.append(
-            f"brain yêu cầu {len(decision.steps)} bước, chỉ chạy {settings.max_steps}"
-        )
-    actions = decision.actions[: settings.max_actions]
-    if len(decision.actions) > settings.max_actions:
-        result.errors.append(
-            f"brain yêu cầu {len(decision.actions)} actions, chỉ chạy {settings.max_actions}"
-        )
-
+    # ReAct loop: brain → tools → brain sees results → brain synthesizes reply.
+    # Each iteration executes one round of steps+actions, then re-calls brain with
+    # accumulated tool_results. Brain terminates by returning reply + empty work.
+    _tool_results: list[str] = []
     prior_output = ""
     saw_review_output = False
-    read_action_outputs: list[tuple[str, str]] = []
-    for step in steps:
-        runner = REGISTRY.get(step.agent)
-        if not runner:
-            result.errors.append(f"unknown agent `{step.agent}`")
-            continue
-        tool_count += 1
-        t0 = time.time()
-        output: str | None = None
-        status = "error"
-        err: str | None = None
-        try:
-            if step.agent == "dev":
-                context_for_step = _dev_context_for_step(prior_output, prior_messages)
-                # A worktree prepared earlier in this thread wins: the dev agent
-                # must edit (and push/PR) inside it, not in the shared clone.
-                if workspace and Path(workspace["worktree"]).is_dir():
-                    dev_cwd = workspace["worktree"]
-                    ws_ctx = _workspace_context_block(workspace)
-                    context_for_step = (
-                        f"{ws_ctx}\n\n---\n{context_for_step}"
-                        if context_for_step else ws_ctx
+
+    for _iter in range(settings.brain_max_iterations):
+        if _iter > 0:
+            await _progress(progress, "🧠 Brain tổng hợp kết quả tool...")
+            started = time.time()
+            try:
+                decision = await decide(
+                    text,
+                    summary=summary,
+                    messages=prior_messages,
+                    workspace_hint=_workspace_brain_hint(workspace) if workspace else None,
+                    tool_results=_tool_results,
+                )
+                tool_count += 1
+            except Exception as e:
+                tool_count += 1
+                log_run(
+                    agent="brain",
+                    input_text=text,
+                    output=None,
+                    status="error",
+                    duration_ms=int((time.time() - started) * 1000),
+                    thread_ts=thread_ts,
+                    channel=channel,
+                    user_id=user_id,
+                    error=str(e),
+                )
+                result.errors.append(f"brain iter {_iter}: {e}")
+                break
+            log_run(
+                agent="brain",
+                input_text=text,
+                output=decision.raw,
+                status="ok",
+                duration_ms=int((time.time() - started) * 1000),
+                thread_ts=thread_ts,
+                channel=channel,
+                user_id=user_id,
+            )
+            if decision.need_clarification and decision.clarify_question:
+                return _with_footer(
+                    f"❓ {decision.clarify_question}", tool_count, t_start
+                )
+
+        has_reply = bool(
+            decision.reply and decision.reply.strip().lower() not in {"null", "none"}
+        )
+        no_more_work = not decision.steps and not decision.actions
+
+        if has_reply and no_more_work:
+            result.add(decision.reply)
+            break
+
+        # Execute this round's steps and actions, collecting outputs for brain.
+        round_results: list[str] = []
+        had_work = False
+
+        steps = decision.steps[: settings.max_steps]
+        if len(decision.steps) > settings.max_steps:
+            result.errors.append(
+                f"brain yêu cầu {len(decision.steps)} bước, chỉ chạy {settings.max_steps}"
+            )
+        for step in steps:
+            runner = REGISTRY.get(step.agent)
+            if not runner:
+                result.errors.append(f"unknown agent `{step.agent}`")
+                continue
+            tool_count += 1
+            task_preview = step.task[:80] + ("..." if len(step.task) > 80 else "")
+            await _progress(progress, f"⚙️ *{step.agent}*: {task_preview}")
+            t0 = time.time()
+            output: str | None = None
+            status = "error"
+            err: str | None = None
+            try:
+                if step.agent == "dev":
+                    context_for_step = _dev_context_for_step(prior_output, prior_messages)
+                    if workspace and Path(workspace["worktree"]).is_dir():
+                        dev_cwd = workspace["worktree"]
+                        ws_ctx = _workspace_context_block(workspace)
+                        context_for_step = (
+                            f"{ws_ctx}\n\n---\n{context_for_step}"
+                            if context_for_step else ws_ctx
+                        )
+                    else:
+                        dev_slug, dev_cwd = _dev_cwd_from_context(
+                            thread_row if thread_ts else None,
+                            text=text,
+                            prior_messages=prior_messages,
+                        )
+                        if dev_slug and thread_ts and not (thread_row or {}).get("repo"):
+                            update_thread_fields(thread_ts, repo=dev_slug)
+                    # Fall back to workspace_dir so dev can browse repos even when
+                    # no specific service path was resolved. apply_changes only when
+                    # a concrete repo was pinned to avoid stray edits.
+                    effective_cwd = dev_cwd or settings.workspace_dir or None
+                    output = await _run_dev_direct(
+                        step.task,
+                        context=context_for_step,
+                        cwd=effective_cwd,
+                        apply_changes=bool(dev_cwd),
                     )
                 else:
-                    dev_slug, dev_cwd = _dev_cwd_from_context(
-                        thread_row if thread_ts else None,
-                        text=text,
-                        prior_messages=prior_messages,
+                    context_for_step, _ = _truncate(
+                        prior_output, settings.max_context_chars, label="context"
                     )
-                    if dev_slug and thread_ts and not (thread_row or {}).get("repo"):
-                        update_thread_fields(thread_ts, repo=dev_slug)
-                output = await _run_dev_direct(
-                    step.task,
-                    context=context_for_step,
-                    cwd=dev_cwd,
-                    apply_changes=bool(dev_cwd),
-                )
-            else:
-                context_for_step, _ = _truncate(
-                    prior_output, settings.max_context_chars, label="context"
-                )
-                output = await runner(step.task, context=context_for_step)
-            status = "ok"
-        except Exception as e:
-            log.exception("agent %s failed", step.agent)
-            err = str(e)
-            result.errors.append(f"{step.agent}: {e}")
-        log_run(
-            agent=step.agent,
-            input_text=step.task,
-            output=output,
-            status=status,
-            duration_ms=int((time.time() - t0) * 1000),
-            thread_ts=thread_ts,
-            channel=channel,
-            user_id=user_id,
-            error=err,
-        )
-        if output:
-            result.add(f"**[{step.agent}]**\n{output}")
-            prior_output = output
-            if step.agent == "review":
-                saw_review_output = True
-        if status == "ok":
-            last_agent = step.agent
-
-    for action in actions:
-        t0 = time.time()
-        tool_result = await _run_action(action)
-        tool_count += 1
-        display, status, error_code = _format_action_result(tool_result)
-        log_run(
-            agent=f"tool:{action.type}",
-            input_text=str(action.payload),
-            output=display,
-            status=status,
-            duration_ms=int((time.time() - t0) * 1000),
-            thread_ts=thread_ts,
-            channel=channel,
-            user_id=user_id,
-            error=error_code,
-        )
-        if (
-            status == "ok"
-            and action.type == "git.prepare_workspace"
-            and thread_ts
-            and isinstance(tool_result.data, dict)
-        ):
-            data = tool_result.data
-            fields: dict = {}
-            if data.get("ticket"):
-                fields["active_ticket"] = data["ticket"]
-            if data.get("worktree_path"):
-                fields["active_worktree"] = data["worktree_path"]
-            if data.get("github_repo"):
-                fields["repo"] = data["github_repo"]
-            if fields:
-                update_thread_fields(thread_ts, **fields)
-        if status == "ok" and _is_fix_pr_request(text, action):
-            tool_count += 1
-            fix_output, fix_status, fix_err = await _run_fix_after_pr_diff(
-                action=action,
-                diff=display,
-                user_text=text,
+                    output = await runner(step.task, context=context_for_step)
+                status = "ok"
+            except Exception as e:
+                log.exception("agent %s failed", step.agent)
+                err = str(e)
+                result.errors.append(f"{step.agent}: {e}")
+            log_run(
+                agent=step.agent,
+                input_text=step.task,
+                output=output,
+                status=status,
+                duration_ms=int((time.time() - t0) * 1000),
                 thread_ts=thread_ts,
                 channel=channel,
                 user_id=user_id,
+                error=err,
             )
-            if fix_status == "ok" and fix_output:
-                result.add(f"**[dev]**\n{fix_output}")
-                last_agent = "dev"
-            else:
-                result.add(display)
-                result.errors.append(f"dev: {fix_err or 'failed'}")
-                last_agent = f"tool:{action.type}"
-        elif status == "ok" and _is_review_pr_request(text, action):
-            tool_count += 1
-            review_output, review_status, review_err = await _run_review_after_pr_diff(
-                action=action,
-                diff=display,
-                thread_ts=thread_ts,
-                channel=channel,
-                user_id=user_id,
-            )
-            if review_status == "ok" and review_output:
-                result.add(f"**[review]**\n{review_output}")
-                last_agent = "review"
-                saw_review_output = True
-            else:
-                result.add(display)
-                result.errors.append(f"review: {review_err or 'failed'}")
-                last_agent = f"tool:{action.type}"
-        else:
-            if status == "ok" and _is_read_action(action.type):
-                read_action_outputs.append((action.type, display))
-            else:
-                result.add(display)
+            if output:
+                round_results.append(f"[{step.agent}]\n{output}")
+                prior_output = output
+                if step.agent == "review":
+                    saw_review_output = True
+                had_work = True
             if status == "ok":
-                last_agent = f"tool:{action.type}"
-        if status == "pending" and thread_ts:
-            data = tool_result.data or {}
-            save_pending_confirmation(
-                thread_ts,
-                action_type=data.get("action_type", action.type),
-                payload=data.get("payload", action.payload),
-                question=tool_result.user_message or "",
-            )
+                last_agent = step.agent
 
-    if read_action_outputs:
-        try:
-            synthesized = await _synthesize_action_reply(
-                user_text=text,
-                tool_outputs=read_action_outputs,
-                summary=summary,
+        actions = decision.actions[: settings.max_actions]
+        if len(decision.actions) > settings.max_actions:
+            result.errors.append(
+                f"brain yêu cầu {len(decision.actions)} actions, chỉ chạy {settings.max_actions}"
             )
+        for action in actions:
+            await _progress(progress, f"📡 `{action.type}`...")
+            t0 = time.time()
+            tool_result = await _run_action(action)
             tool_count += 1
-            result.add(synthesized.strip())
-        except Exception as e:
-            log.exception("action reply synthesis failed")
-            for _, output in read_action_outputs:
-                result.add(output)
-            result.errors.append(f"synthesis: {e}")
+            display, status, error_code = _format_action_result(tool_result)
+            log_run(
+                agent=f"tool:{action.type}",
+                input_text=str(action.payload),
+                output=display,
+                status=status,
+                duration_ms=int((time.time() - t0) * 1000),
+                thread_ts=thread_ts,
+                channel=channel,
+                user_id=user_id,
+                error=error_code,
+            )
+            if (
+                status == "ok"
+                and action.type == "git.prepare_workspace"
+                and thread_ts
+                and isinstance(tool_result.data, dict)
+            ):
+                data = tool_result.data
+                fields: dict = {}
+                if data.get("ticket"):
+                    fields["active_ticket"] = data["ticket"]
+                if data.get("worktree_path"):
+                    fields["active_worktree"] = data["worktree_path"]
+                if data.get("github_repo"):
+                    fields["repo"] = data["github_repo"]
+                if fields:
+                    update_thread_fields(thread_ts, **fields)
+            if status == "pending" and thread_ts:
+                data = tool_result.data or {}
+                save_pending_confirmation(
+                    thread_ts,
+                    action_type=data.get("action_type", action.type),
+                    payload=data.get("payload", action.payload),
+                    question=tool_result.user_message or "",
+                )
+                # Surface confirmation question immediately — stop the loop.
+                return _with_footer(
+                    f"❓ {tool_result.user_message}", tool_count, t_start
+                )
+            if status == "ok" and _is_fix_pr_request(text, action):
+                tool_count += 1
+                fix_output, fix_status, fix_err = await _run_fix_after_pr_diff(
+                    action=action,
+                    diff=display,
+                    user_text=text,
+                    thread_ts=thread_ts,
+                    channel=channel,
+                    user_id=user_id,
+                )
+                if fix_status == "ok" and fix_output:
+                    round_results.append(f"[dev]\n{fix_output}")
+                    last_agent = "dev"
+                else:
+                    round_results.append(display)
+                    result.errors.append(f"dev: {fix_err or 'failed'}")
+                    last_agent = f"tool:{action.type}"
+                had_work = True
+            elif status == "ok" and _is_review_pr_request(text, action):
+                tool_count += 1
+                review_output, review_status, review_err = await _run_review_after_pr_diff(
+                    action=action,
+                    diff=display,
+                    thread_ts=thread_ts,
+                    channel=channel,
+                    user_id=user_id,
+                )
+                if review_status == "ok" and review_output:
+                    round_results.append(f"[review]\n{review_output}")
+                    last_agent = "review"
+                    saw_review_output = True
+                else:
+                    round_results.append(display)
+                    result.errors.append(f"review: {review_err or 'failed'}")
+                    last_agent = f"tool:{action.type}"
+                had_work = True
+            else:
+                round_results.append(f"[{action.type}]\n{display}")
+                if status == "ok":
+                    last_agent = f"tool:{action.type}"
+                had_work = True
+
+        _tool_results.extend(round_results)
+
+        if not had_work:
+            # Brain returned no actionable work; if it had a reply use it, else stop.
+            if has_reply:
+                result.add(decision.reply)
+            break
+
+    # Fallback: loop exhausted without brain producing a synthesized reply.
+    if not result.blocks and _tool_results:
+        for tr in _tool_results:
+            result.add(tr)
 
     rendered = result.render()
     if not saw_review_output:

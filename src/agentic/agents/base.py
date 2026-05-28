@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+from contextvars import ContextVar
 from pathlib import Path
 
 from ..config import settings
@@ -7,6 +9,10 @@ from ..config import settings
 log = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+# Accumulates per-call usage dicts within a single handle_message() invocation.
+# Dispatcher sets this up; background tasks (summarizer) run outside it.
+_usage_tracker: ContextVar[list | None] = ContextVar("_usage_tracker", default=None)
 
 
 class ClaudeRunError(RuntimeError):
@@ -44,7 +50,7 @@ async def run_claude(
         prompt_flag,
         system_prompt,
         "--output-format",
-        "text",
+        "json",
     ]
     if model:
         args.extend(["--model", model])
@@ -84,4 +90,26 @@ async def run_claude(
         raise ClaudeRunError(f"claude timed out after {timeout}s")
     if proc.returncode != 0:
         raise ClaudeRunError(stderr.decode("utf-8", errors="replace")[:4000])
-    return stdout.decode("utf-8", errors="replace").strip()
+    raw = stdout.decode("utf-8", errors="replace").strip()
+    try:
+        envelope = json.loads(raw)
+        usage = envelope.get("usage") or {}
+        in_tok = (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+        )
+        out_tok = usage.get("output_tokens", 0)
+        cost = envelope.get("total_cost_usd")
+        cost_str = f" cost=${cost:.4f}" if cost is not None else ""
+        log.info("claude usage: in=%d out=%d%s", in_tok, out_tok, cost_str)
+        tracker = _usage_tracker.get(None)
+        if tracker is not None:
+            tracker.append({
+                "total_input_tokens": in_tok,
+                "total_output_tokens": out_tok,
+                "cost_usd": cost,
+            })
+        return envelope.get("result", raw)
+    except (json.JSONDecodeError, AttributeError):
+        return raw

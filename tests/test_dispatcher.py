@@ -376,9 +376,19 @@ def test_bare_repo_resolution_rejects_ambiguous_matches(tmp_path):
 
 
 async def test_dispatcher_synthesizes_read_action_outputs(monkeypatch):
-    seen = {}
+    call_count = 0
 
-    async def decide_get_issue(msg, *, summary=None, messages=None, workspace_hint=None):
+    async def decide_get_issue(msg, *, summary=None, messages=None, workspace_hint=None, tool_results=None):
+        nonlocal call_count
+        call_count += 1
+        if tool_results:
+            # Second call: brain sees results and synthesizes final reply.
+            return BrainDecision(
+                reply="KRP-123 specs: lookup driver by user ID.",
+                actions=[],
+                steps=[],
+                raw="(mocked-iter2)",
+            )
         return BrainDecision(
             reply=None,
             actions=[Action(type="jira.get_issue", payload={"key": "KRP-123"})],
@@ -390,13 +400,8 @@ async def test_dispatcher_synthesizes_read_action_outputs(monkeypatch):
             "*KRP-123* — Driver docs\n\n*Description / specs:*\nLookup driver by user ID."
         )
 
-    async def fake_synthesize(**kwargs):
-        seen.update(kwargs)
-        return "KRP-123 specs: lookup driver by user ID."
-
     monkeypatch.setattr(dispatcher, "decide", decide_get_issue)
     monkeypatch.setattr(dispatcher, "_run_action", fake_run_action)
-    monkeypatch.setattr(dispatcher, "_synthesize_action_reply", fake_synthesize)
 
     out = await dispatcher.handle_message(
         "docs/specs KRP-123 là gì?",
@@ -407,9 +412,7 @@ async def test_dispatcher_synthesizes_read_action_outputs(monkeypatch):
 
     assert "KRP-123 specs: lookup driver by user ID." in out
     assert "🛠️" in out  # footer line appended
-    assert seen["user_text"] == "docs/specs KRP-123 là gì?"
-    assert seen["tool_outputs"][0][0] == "jira.get_issue"
-    assert "Lookup driver" in seen["tool_outputs"][0][1]
+    assert call_count == 2  # brain called twice: plan + synthesize
 
 
 def test_has_log_output_only_for_loki():

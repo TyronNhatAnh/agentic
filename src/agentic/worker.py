@@ -59,6 +59,7 @@ class JobRunner:
                     channel=job.channel,
                     user_id=job.user_id,
                     thread_history=job.thread_history,
+                    progress=job.progress,
                 )
             except Exception as e:
                 log.exception("worker %d handler error", idx)

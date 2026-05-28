@@ -92,6 +92,7 @@ async def decide(
     summary: str | None = None,
     messages: list[dict] | None = None,
     workspace_hint: str | None = None,
+    tool_results: list[str] | None = None,
 ) -> BrainDecision:
     system = load_prompt("brain")
     parts: list[str] = []
@@ -103,6 +104,9 @@ async def decide(
     if recent:
         parts.append(f"## Tin nhắn gần đây\n{recent}")
     parts.append(f"## Tin nhắn mới của user\n{user_message}")
+    if tool_results:
+        formatted = "\n\n---\n".join(tool_results)
+        parts.append(f"## Kết quả công cụ vừa chạy\n{formatted}")
     user = "\n\n".join(parts)
     raw = await run_claude(system, user, model=settings.brain_model)
     try:
