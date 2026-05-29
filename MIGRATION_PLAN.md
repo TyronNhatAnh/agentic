@@ -91,11 +91,11 @@ Cập nhật checkbox khi xong. **Mỗi phase merge được độc lập, có r
 **Pass criteria:** ✅ `pytest -q` 39 passed; ✅ smoke 6/6 pass; ✅ `_check_claude_version()` confirm `2.1.133`.
 
 ### Phase 1 — Dev agent (2-3 ngày, value cao nhất)
-- [ ] `sdk/permission.py` — `PendingPermissions` (dict[req_id → asyncio.Future]) + `slack_permission_callback(...)` factory. Xem §12.A.
-- [ ] `sdk/dev_agent.py` — `run_dev_sdk(...)` với signature đầy đủ §12.B. Lấy client từ `ThreadSessionManager`, gắn `slack_permission_callback`, stream messages, return final reply text.
-- [ ] `sdk/dev_options.py` — `build_dev_options(thread_ts, cwd, permission_cb)` → `ClaudeAgentOptions`. Tools/permissions theo §12.C.
-- [ ] Wire vào [slack_handlers.py](src/agentic/slack_handlers.py): khi user reply mà thread có pending permission → resolve Future thay vì submit Job mới. Xem §12.D.
-- [ ] Plug vào [dispatcher.py:914-940](src/agentic/dispatcher.py#L914-L940) gated bằng `settings.use_sdk`. Xem §12.E.
+- [x] `sdk/permission.py` — `PendingPermissions` (dict[req_id → asyncio.Future]) + `build_slack_permission_callback(...)` factory. Phase 1 whitelists rỗng — xem §8 (SDK skip can_use_tool khi tool đã ở allowed_tools).
+- [x] `sdk/dev_agent.py` — `run_dev_sdk(...)` lấy client từ `ThreadSessionManager`, query, stream `AssistantMessage`/`TextBlock` về Slack placeholder (debounce 1.5s), persist `session_id` từ `ResultMessage` vào `threads.sdk_session_id`.
+- [x] `sdk/dev_options.py` — `build_dev_options(thread_ts, cwd, permission_cb, session_store)` → `ClaudeAgentOptions` với `permission_mode="acceptEdits"` always, allowed/disallowed mirror legacy [agents/dev.py](src/agentic/agents/dev.py), `resume=` lấy từ `threads.sdk_session_id` (cross-restart). Session cwd locked theo §8 — xem decision log.
+- [x] Wire vào [slack_handlers.py](src/agentic/slack_handlers.py): button block_kit `perm_allow` / `perm_deny` → `pending.resolve(req_id, allow)`. Job thêm `slack_client` + `placeholder_ts`. KHÔNG parse text user.
+- [x] Plug vào [dispatcher.py:914-940](src/agentic/dispatcher.py#L914-L940) gated bằng `settings.use_sdk`; singletons (`_pool`, `_pending`) khởi tạo ở [main.py](src/agentic/main.py) qua `init_sdk_singletons(...)`.
 - [ ] Eval 5 ticket: edit + commit + push + open PR end-to-end **không cần user pin service**
 
 **Pass criteria:**
@@ -238,6 +238,9 @@ File ảnh hưởng: ...
 - **2026-05-29** — Phase 0 — Auth: dùng `claude login` subscription, không API key. Verified từ SDK source `SubprocessCLITransport` ([client.py:25](file:///tmp/casdk/unpacked/claude_agent_sdk/_internal/client.py#L25)).
 - **2026-05-29** — Phase 1 — Dev sandbox bug root cause: [dev.py:47](src/agentic/agents/dev.py#L47) chỉ set permission khi `apply_changes=True`, `apply_changes=bool(dev_cwd)` ở [dispatcher.py:939](src/agentic/dispatcher.py#L939). Fix qua SDK (Phase 1), không hot-fix `claude -p`.
 - **2026-05-29** — Phase 2 — Brain prompt 237 dòng có overfit tool catalog prose + phrase mapping. Rút gọn khi convert sang SDK, để SDK auto inject tool schema.
+- **2026-05-29** — Phase 1 — `git push` confirm: DROP ở Phase 1. Lý do: SDK skip `can_use_tool` cho tool đã ở `allowed_tools` ([types.py:1748-1758](file:///tmp/casdk/unpacked/claude_agent_sdk/types.py#L1748)). `Bash(git push:*)` allow-listed cho dev workflow → callback không bao giờ fire dù `CONFIRM_BASH_PATTERNS` khai báo. Phase 1 ship `PendingPermissions` machinery + button handlers cho Phase 2 reuse (MCP `github_merge_pr`/`github_approve_pr` không ở allowed_tools, sẽ fire callback đúng). Nếu cần gate tool đã allow → phải dùng `PreToolUse` hook (Phase 4 territory).
+- **2026-05-29** — Phase 1 — Session cwd locked tại workspace_dir (không vary per-call). Plan §12.C ngầm assume cwd flow qua mỗi call, nhưng `ThreadSessionManager` cache session per-thread → cwd ở options chỉ có hiệu lực lúc session-open. Phase 1 settle: options dùng `cwd=workspace_dir` + `add_dirs=[worktree_dir]` (nếu khác workspace), per-turn worktree path inject vào user prompt qua context block — đúng pattern §2 ("let the model reason from context"). Worktree path thay đổi mid-thread → log + tiếp tục (Phase 4 có thể release+recreate session nếu cần).
+- **2026-05-29** — Phase 1 — Phase 1 wired regardless of `AGENTIC_USE_SDK` flag value (singletons khởi tạo, button handlers register). Gate chỉ ảnh hưởng nhánh code dev step trong dispatcher. Lý do: button handlers phải tồn tại để user click không bị "unknown action"; pool/pending là cheap khi không có session nào active.
 
 ---
 

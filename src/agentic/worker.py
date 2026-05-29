@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +20,10 @@ class Job:
     progress: ReplyFn | None = None
     progress_messages: list[str] = field(default_factory=list)
     thread_history: list[dict] = field(default_factory=list)
+    # SDK path (Phase 1+) needs raw Slack access to stream into the placeholder
+    # and post permission-button messages. Legacy `claude -p` path ignores these.
+    slack_client: Any = None
+    placeholder_ts: str | None = None
 
 
 class JobRunner:
@@ -60,6 +65,8 @@ class JobRunner:
                     user_id=job.user_id,
                     thread_history=job.thread_history,
                     progress=job.progress,
+                    slack_client=job.slack_client,
+                    placeholder_ts=job.placeholder_ts,
                 )
             except Exception as e:
                 log.exception("worker %d handler error", idx)

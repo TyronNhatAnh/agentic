@@ -15,6 +15,7 @@ from .integrations import git as git_int
 from .integrations import github, grafana, jira
 from .integrations import ship as ship_int
 from .integrations.result import ToolResult
+from .sdk import PendingPermissions, ThreadSessionManager, run_dev_sdk
 from .store import (
     add_message,
     clear_pending_confirmation,
@@ -51,6 +52,32 @@ def _is_affirmative(text: str) -> bool:
 
 def _is_negative(text: str) -> bool:
     return _normalize_reply(text) in _NEGATIVE
+
+
+# SDK singletons (Phase 1+). main.py calls `init_sdk_singletons(...)` after
+# init_db; tests and the legacy code path can leave them unset (None).
+_pool: ThreadSessionManager | None = None
+_pending: PendingPermissions | None = None
+
+
+def init_sdk_singletons(
+    *,
+    pool: ThreadSessionManager,
+    pending: PendingPermissions,
+) -> None:
+    global _pool, _pending
+    _pool = pool
+    _pending = pending
+
+
+def _pool_singleton() -> ThreadSessionManager | None:
+    return _pool
+
+
+def _pending_singleton() -> PendingPermissions | None:
+    return _pending
+
+
 from .summarizer import maybe_schedule as maybe_schedule_summary
 from .worker import ReplyFn
 
@@ -706,6 +733,8 @@ async def handle_message(
     user_id: str | None,
     thread_history: list[dict] | None = None,
     progress: ReplyFn | None = None,
+    slack_client=None,
+    placeholder_ts: str | None = None,
 ) -> str:
     t_start = time.time()
     tool_count = 0
@@ -932,12 +961,37 @@ async def handle_message(
                     # no specific service path was resolved. apply_changes only when
                     # a concrete repo was pinned to avoid stray edits.
                     effective_cwd = dev_cwd or settings.workspace_dir or None
-                    output = await _run_dev_direct(
-                        step.task,
-                        context=context_for_step,
-                        cwd=effective_cwd,
-                        apply_changes=bool(dev_cwd),
-                    )
+                    if (
+                        settings.use_sdk
+                        and thread_ts
+                        and slack_client is not None
+                        and placeholder_ts
+                    ):
+                        pool = _pool_singleton()
+                        pending_perms = _pending_singleton()
+                        if pool is None or pending_perms is None:
+                            raise RuntimeError(
+                                "AGENTIC_USE_SDK=true but SDK singletons not initialized "
+                                "(main.py must call init_sdk_singletons)"
+                            )
+                        output = await run_dev_sdk(
+                            step.task,
+                            thread_ts=thread_ts,
+                            channel_id=channel or "",
+                            slack_client=slack_client,
+                            placeholder_ts=placeholder_ts,
+                            cwd=effective_cwd,
+                            context=context_for_step,
+                            pool=pool,
+                            pending=pending_perms,
+                        )
+                    else:
+                        output = await _run_dev_direct(
+                            step.task,
+                            context=context_for_step,
+                            cwd=effective_cwd,
+                            apply_changes=bool(dev_cwd),
+                        )
                 else:
                     context_for_step, _ = _truncate(
                         prior_output, settings.max_context_chars, label="context"

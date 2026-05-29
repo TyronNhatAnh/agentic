@@ -10,9 +10,14 @@ Public surface (stable across phases):
 """
 
 from .client_pool import ThreadSessionManager
+from .dev_agent import make_dev_options_factory, run_dev_sdk
+from .permission import PendingPermissions
 from .session_store import SqliteSessionStore
 
 __all__ = [
-    "ThreadSessionManager",
+    "PendingPermissions",
     "SqliteSessionStore",
+    "ThreadSessionManager",
+    "make_dev_options_factory",
+    "run_dev_sdk",
 ]

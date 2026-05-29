@@ -7,7 +7,13 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 
 from .config import settings
-from .dispatcher import handle_message
+from .dispatcher import handle_message, init_sdk_singletons
+from .sdk import (
+    PendingPermissions,
+    SqliteSessionStore,
+    ThreadSessionManager,
+    make_dev_options_factory,
+)
 from .slack_handlers import register
 from .store import init_db
 from .worker import JobRunner
@@ -60,12 +66,52 @@ async def _main() -> None:
     app = AsyncApp(token=settings.slack_bot_token)
     runner = JobRunner(handle_message, concurrency=settings.worker_concurrency)
     runner.start()
-    register(app, runner)
+
+    # SDK singletons: wired regardless of the use_sdk flag so the Slack
+    # perm_allow/perm_deny button handlers exist (no-op when no Future is
+    # pending). The pool's ClaudeSDKClient instances are created lazily on
+    # first use, so this stays cheap when the flag is off.
+    session_store = SqliteSessionStore()
+    pending = PendingPermissions()
+    factory = make_dev_options_factory(
+        pending=pending,
+        session_store=session_store,
+        slack_client=app.client,
+    )
+    pool = ThreadSessionManager(factory)
+    init_sdk_singletons(pool=pool, pending=pending)
+
+    register(app, runner, pending=pending)
+    sweeper = asyncio.create_task(
+        _sdk_idle_sweeper(pool), name="agentic-sdk-idle-sweep"
+    )
     handler = AsyncSocketModeHandler(app, settings.slack_app_token)
     logging.getLogger(__name__).info(
-        "⚡️ Bolt app started (Socket Mode), workers=%d", settings.worker_concurrency
+        "⚡️ Bolt app started (Socket Mode), workers=%d sdk=%s",
+        settings.worker_concurrency,
+        "on" if settings.use_sdk else "off",
     )
-    await handler.start_async()
+    try:
+        await handler.start_async()
+    finally:
+        sweeper.cancel()
+        await pool.shutdown_all()
+
+
+async def _sdk_idle_sweeper(pool: ThreadSessionManager) -> None:
+    """Reap idle SDK sessions every minute so subprocess slots free up."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            closed = await pool.sweep_idle()
+            if closed:
+                logging.getLogger(__name__).info(
+                    "sdk idle sweep closed %d session(s)", closed
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger(__name__).exception("sdk idle sweep failed")
 
 
 def run() -> None:

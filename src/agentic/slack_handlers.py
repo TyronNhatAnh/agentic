@@ -5,6 +5,7 @@ import time
 from slack_bolt.async_app import AsyncApp
 
 from .config import settings
+from .sdk import PendingPermissions
 from .worker import Job, JobRunner
 
 log = logging.getLogger(__name__)
@@ -212,7 +213,18 @@ async def _channel_name(client, channel_id: str) -> str | None:
     return _channel_name_cache[channel_id][0]
 
 
-def register(app: AsyncApp, runner: JobRunner) -> None:
+def register(
+    app: AsyncApp,
+    runner: JobRunner,
+    *,
+    pending: PendingPermissions | None = None,
+) -> None:
+    """Wire Slack events + SDK permission button actions.
+
+    `pending` is the singleton PendingPermissions instance from main.py. It can
+    be None when running under tests / before Phase 1 wiring; in that case the
+    perm_allow / perm_deny buttons simply ack with no effect.
+    """
     allowed = settings.allowed_channel_names
 
     async def _is_allowed(client, channel_id: str) -> bool:
@@ -285,6 +297,8 @@ def register(app: AsyncApp, runner: JobRunner) -> None:
             progress=progress,
             progress_messages=_progress_messages_for(text),
             thread_history=thread_history,
+            slack_client=client,
+            placeholder_ts=placeholder["ts"],
         )
         accepted = await runner.submit(job)
         if not accepted:
@@ -294,3 +308,38 @@ def register(app: AsyncApp, runner: JobRunner) -> None:
     async def on_message(event, client):
         # Mention required everywhere; non-mention messages are ignored.
         return
+
+    @app.action("perm_allow")
+    async def on_perm_allow(ack, body, client):
+        await ack()
+        await _resolve_permission(client, body, allow=True)
+
+    @app.action("perm_deny")
+    async def on_perm_deny(ack, body, client):
+        await ack()
+        await _resolve_permission(client, body, allow=False)
+
+    async def _resolve_permission(client, body: dict, *, allow: bool) -> None:
+        # value carries `req_id` we set when posting the buttons.
+        try:
+            req_id = body["actions"][0]["value"]
+        except (KeyError, IndexError):
+            log.warning("perm action missing req_id: %s", body)
+            return
+        verdict = pending.resolve(req_id, allow) if pending else False
+        # Replace the button message with a static decision marker so the user
+        # sees their click reflected and the buttons can't be re-pressed.
+        message = body.get("message") or {}
+        channel = (body.get("channel") or {}).get("id") or ""
+        ts = message.get("ts")
+        if not (channel and ts):
+            return
+        label = "✅ Đã cho phép" if allow else "❌ Đã huỷ"
+        if not verdict:
+            # Future already resolved or expired — still update text so the UI
+            # doesn't look stuck.
+            label = f"{label} (request đã hết hạn)"
+        try:
+            await client.chat_update(channel=channel, ts=ts, text=label, blocks=[])
+        except Exception:
+            log.exception("perm chat_update failed req=%s", req_id)
