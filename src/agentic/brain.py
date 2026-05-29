@@ -120,9 +120,13 @@ async def decide(
     raw = await run_claude(system, user, model=settings.brain_model)
     try:
         return parse_decision(raw)
-    except Exception as e:
-        log.warning("brain JSON parse failed (attempt 1): %s; raw_head=%r", e, raw[:200])
-        # Retry: wrap the prose output back into a JSON reply.
+    except ValueError as e:
+        if not isinstance(e, json.JSONDecodeError):
+            # No JSON object found — model returned pure prose. Use it directly as reply.
+            log.warning("brain returned prose instead of JSON: %s; raw_head=%r", e, raw[:200])
+            return BrainDecision(reply=raw, raw=raw)
+        log.warning("brain JSON malformed (attempt 1): %s; raw_head=%r", e, raw[:200])
+        # JSON found but malformed — retry to fix syntax.
         retry_user = (
             user
             + "\n\n---\nOutput của bạn vừa rồi không phải JSON hợp lệ.\n"

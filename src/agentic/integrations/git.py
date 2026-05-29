@@ -21,15 +21,44 @@ from .result import ToolResult, classify_exception
 _TICKET_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 
 
-async def _run_git(*args: str, cwd: str | None = None) -> tuple[int, str, str]:
+async def _run_git(*args: str, cwd: str | None = None,
+                   env: dict[str, str] | None = None) -> tuple[int, str, str]:
+    import os
+    proc_env = {**os.environ, **(env or {})}
     proc = await asyncio.create_subprocess_exec(
         "git", *args,
         cwd=cwd,
+        env=proc_env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     out, err = await proc.communicate()
     return proc.returncode or 0, out.decode().strip(), err.decode().strip()
+
+
+async def _authed_remote_url(repo_path: str) -> tuple[str, dict[str, str]]:
+    """Return (remote_url, env_overrides) for authenticated remote operations.
+
+    If GITHUB_TOKEN is set, returns an HTTPS+token URL plus env overrides that
+    set GIT_CONFIG_GLOBAL=/dev/null to bypass ~/.gitconfig insteadOf rules
+    (which would rewrite the HTTPS URL back to SSH). Falls back to "origin"
+    (system auth) when no token is configured.
+    """
+    token = settings.github_token
+    if not token:
+        return "origin", {}
+    _, remote_url, _ = await _run_git("remote", "get-url", "origin", cwd=repo_path)
+    remote_url = remote_url.strip()
+    if remote_url.startswith("git@github.com:"):
+        path_part = remote_url[len("git@github.com:"):]
+        https_url = f"https://x-access-token:{token}@github.com/{path_part}"
+    elif remote_url.startswith("https://github.com/"):
+        https_url = remote_url.replace("https://github.com/", f"https://x-access-token:{token}@github.com/", 1)
+    else:
+        return "origin", {}
+    # GIT_CONFIG_GLOBAL=/dev/null prevents git from loading ~/.gitconfig, which
+    # may have insteadOf rules that rewrite HTTPS URLs back to SSH.
+    return https_url, {"GIT_CONFIG_GLOBAL": "/dev/null"}
 
 
 async def _branch_exists(repo_path: str, ref: str) -> bool:
@@ -194,7 +223,8 @@ async def prepare_workspace(service: str, ticket: str,
         )
 
     # 1. Fetch
-    rc, _, err = await _run_git("fetch", "origin", "--prune", cwd=repo_path)
+    fetch_url, authed_env = await _authed_remote_url(repo_path)
+    rc, _, err = await _run_git("fetch", fetch_url, "--prune", cwd=repo_path, env=authed_env)
     if rc != 0:
         return ToolResult.failure("GIT_FETCH", f"git fetch lỗi: {err[:200]}")
 
@@ -301,10 +331,6 @@ async def prepare_workspace(service: str, ticket: str,
 
 async def commit_branch(service: str, ticket: str, message: str,
                         confirmed: bool = False) -> ToolResult:
-    if not _TICKET_RE.match(ticket):
-        return ToolResult.failure(
-            "VALIDATION", f"Ticket key `{ticket}` không hợp lệ (cần dạng ABC-123)."
-        )
     if not message.strip():
         return ToolResult.failure("VALIDATION", "Commit message không được rỗng.")
     svc = resolve_service(service)
@@ -358,12 +384,7 @@ async def commit_branch(service: str, ticket: str, message: str,
     )
 
 
-async def push_branch(service: str, ticket: str,
-                      confirmed: bool = False) -> ToolResult:
-    if not _TICKET_RE.match(ticket):
-        return ToolResult.failure(
-            "VALIDATION", f"Ticket key `{ticket}` không hợp lệ (cần dạng ABC-123)."
-        )
+async def push_branch(service: str, ticket: str) -> ToolResult:
     svc = resolve_service(service)
     if not svc:
         return ToolResult.failure(
@@ -376,28 +397,8 @@ async def push_branch(service: str, ticket: str,
             f"Chưa có worktree cho `feature/{ticket}`. Chạy `git.prepare_workspace` trước.",
         )
     feature_branch = f"feature/{ticket}"
-
-    if not confirmed:
-        question = (
-            f"Push branch `{feature_branch}` từ `{worktree_path}` lên origin? "
-            f"(reply: ok / không)"
-        )
-        res = ToolResult.failure("NEEDS_CONFIRMATION", question)
-        res.data = {
-            "action_type": "git.push",
-            "payload": {"service": service, "ticket": ticket, "confirmed": True},
-        }
-        return res
-
-    push_url = "origin"
-    token = settings.github_token
-    if token:
-        _, remote_url, _ = await _run_git("remote", "get-url", "origin", cwd=str(worktree_path))
-        if remote_url.startswith("git@github.com:"):
-            repo_path_part = remote_url[len("git@github.com:"):]
-            push_url = f"https://x-access-token:{token}@github.com/{repo_path_part}"
-
-    rc, _, err = await _run_git("push", "-u", push_url, feature_branch, cwd=str(worktree_path))
+    push_url, authed_env = await _authed_remote_url(str(worktree_path))
+    rc, _, err = await _run_git("push", "-u", push_url, feature_branch, cwd=str(worktree_path), env=authed_env)
     if rc != 0:
         return ToolResult.failure("GIT_PUSH", f"git push lỗi: {err[:300]}")
     return ToolResult.success(f"✅ Pushed `{feature_branch}` lên origin.")
@@ -430,7 +431,8 @@ async def prepare_pr_review_workspace(repo: str, pr: int) -> ToolResult:
         )
 
     fetch_ref = f"pull/{pr}/head"
-    rc, _, err = await _run_git("fetch", "origin", fetch_ref, cwd=repo_path)
+    fetch_url, authed_env = await _authed_remote_url(repo_path)
+    rc, _, err = await _run_git("fetch", fetch_url, fetch_ref, cwd=repo_path, env=authed_env)
     if rc != 0:
         return ToolResult.failure("GIT_FETCH", f"git fetch `{fetch_ref}` lỗi: {err[:300]}")
 
@@ -507,9 +509,7 @@ ACTION_HANDLERS = {
         p["service"], p["ticket"], p["message"],
         bool(p.get("confirmed", False)),
     ),
-    "git.push": lambda p: push_branch(
-        p["service"], p["ticket"], bool(p.get("confirmed", False)),
-    ),
+    "git.push": lambda p: push_branch(p["service"], p["ticket"]),
 }
 
 

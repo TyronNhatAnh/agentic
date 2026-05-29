@@ -99,28 +99,12 @@ async def create_pr(
     body: str = "",
     repo: str | None = None,
     draft: bool = False,
-    confirmed: bool = False,
 ) -> ToolResult:
     repo = _repo(repo)
     if not title.strip():
         return ToolResult.failure("VALIDATION", "PR title không được rỗng.")
     if not head.strip() or not base.strip():
         return ToolResult.failure("VALIDATION", "head/base branch không được rỗng.")
-
-    if not confirmed:
-        draft_label = "draft " if draft else ""
-        question = (
-            f"Tạo {draft_label}PR trong `{repo}`: `{head}` → `{base}`\n"
-            f"Title: {title}\n"
-            f"(reply: ok / không)"
-        )
-        res = ToolResult.failure("NEEDS_CONFIRMATION", question)
-        res.data = {
-            "action_type": "github.create_pr",
-            "payload": {"repo": repo, "title": title, "head": head, "base": base,
-                        "body": body, "draft": draft, "confirmed": True},
-        }
-        return res
 
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
@@ -159,6 +143,52 @@ async def create_pr(
         d = r.json()
     return ToolResult.success(
         f"✅ Tạo PR #{d['number']} `{repo}`: <{d['html_url']}|{d['title']}>"
+    )
+
+
+async def update_pr(
+    pr: int,
+    repo: str | None = None,
+    base: str | None = None,
+    title: str | None = None,
+    body: str | None = None,
+    draft: bool | None = None,
+) -> ToolResult:
+    repo = _repo(repo)
+    patch: dict = {}
+    if base is not None:
+        patch["base"] = base
+    if title is not None:
+        patch["title"] = title
+    if body is not None:
+        patch["body"] = body
+    if draft is not None:
+        patch["draft"] = draft
+    if not patch:
+        return ToolResult.failure("VALIDATION", "Không có trường nào để cập nhật.")
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.patch(
+            f"{API}/repos/{repo}/pulls/{pr}",
+            headers=_headers(),
+            json=patch,
+        )
+        if r.status_code == 422:
+            data = r.json() or {}
+            msg = data.get("message") or "cập nhật PR bị từ chối"
+            return ToolResult.failure("VALIDATION", f"GitHub từ chối: {msg}")
+        r.raise_for_status()
+        d = r.json()
+    parts = []
+    if base is not None:
+        parts.append(f"base → `{d['base']['ref']}`")
+    if title is not None:
+        parts.append(f"title → `{d['title']}`")
+    if draft is not None:
+        parts.append(f"draft → `{d['draft']}`")
+    summary = ", ".join(parts) or "cập nhật thành công"
+    return ToolResult.success(
+        f"✅ PR #{pr} `{repo}` đã cập nhật: {summary}. <{d['html_url']}|Xem PR>"
     )
 
 
@@ -394,8 +424,7 @@ ACTION_HANDLERS = {
     "github.create_issue":     lambda p: create_issue(p["title"], p["body"], p.get("repo")),
     "github.create_pr":        lambda p: create_pr(p["title"], p["head"], p["base"],
                                                    p.get("body", ""), p.get("repo"),
-                                                   bool(p.get("draft", False)),
-                                                   bool(p.get("confirmed", False))),
+                                                   bool(p.get("draft", False))),
     "github.comment_pr":       lambda p: comment_pr(p["pr"], p["body"], p.get("repo")),
     "github.approve_pr":       lambda p: approve_pr(p["pr"], p.get("repo"), p.get("body", ""),
                                                     bool(p.get("confirmed", False))),
@@ -413,6 +442,10 @@ ACTION_HANDLERS = {
     "github.get_pr":           lambda p: get_pr(p["pr"], p.get("repo")),
     "github.get_pr_diff":      lambda p: get_pr_diff(p["pr"], p.get("repo"),
                                                      p.get("max_chars", 20000)),
+    "github.update_pr":        lambda p: update_pr(p["pr"], p.get("repo"),
+                                                   p.get("base"), p.get("title"),
+                                                   p.get("body"),
+                                                   p["draft"] if "draft" in p else None),
 }
 
 
