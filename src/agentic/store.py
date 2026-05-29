@@ -117,11 +117,14 @@ _THREAD_ADDED_COLUMNS = {
     "repo": "TEXT",
     "active_ticket": "TEXT",
     "active_worktree": "TEXT",
+    "sdk_session_id": "TEXT",
+    "sdk_state_blob": "TEXT",
 }
 
 _THREAD_FIELDS = {
     "summary", "last_agent", "jira_keys", "pr_refs", "repo",
     "active_ticket", "active_worktree",
+    "sdk_session_id", "sdk_state_blob",
 }
 
 # Columns added to service_repos after its initial release; migrated on startup

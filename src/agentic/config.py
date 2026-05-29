@@ -68,6 +68,11 @@ class Settings(BaseSettings):
 
     slack_allowed_channels: str = Field(default="", alias="SLACK_ALLOWED_CHANNELS")
 
+    use_sdk: bool = Field(default=False, alias="AGENTIC_USE_SDK")
+    min_claude_version: str = Field(default="2.0.0", alias="MIN_CLAUDE_VERSION")
+    sdk_session_idle_ttl_s: int = Field(default=1800, alias="SDK_SESSION_IDLE_TTL_S")
+    sdk_max_concurrent_sessions: int = Field(default=20, alias="SDK_MAX_CONCURRENT_SESSIONS")
+
     @property
     def allowed_channel_names(self) -> set[str]:
         """Returns lowercase names and raw IDs (e.g. D0XXXXXX) from SLACK_ALLOWED_CHANNELS."""

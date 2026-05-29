@@ -101,7 +101,11 @@
       "Bash(git push *)",
       "Bash(git config *)",
       "Bash(ps -p 9079 -o pid,lstart,etime,command)",
-      "Bash(claude -p \"Reply with just: ok\" --system-prompt \"You are a test.\" --output-format json)"
+      "Bash(claude -p \"Reply with just: ok\" --system-prompt \"You are a test.\" --output-format json)",
+      "WebSearch",
+      "Read(//private/tmp/casdk/**)",
+      "Bash(unzip -q claude_agent_sdk-0.2.87-py3-none-macosx_11_0_arm64.whl -d unpacked)",
+      "Bash(.venv/bin/pip install *)"
     ],
     "deny": [
       "Read(//Users/tyron/Projects/agentic/.env)",
