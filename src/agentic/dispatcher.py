@@ -23,40 +23,14 @@ from .sdk import (
 )
 from .store import (
     add_message,
-    clear_pending_confirmation,
-    get_pending_confirmation,
     get_thread,
     list_services,
     log_run,
     recent_messages,
     resolve_service_by_github_repo,
-    save_pending_confirmation,
     touch_thread,
     update_thread_fields,
 )
-
-_AFFIRMATIVE = {
-    "ok", "okay", "oke", "okie", "yes", "yeah", "yep",
-    "ừ", "ừm", "uhm", "được", "đồng ý",
-    "tiếp", "tiếp tục", "làm đi", "chốt", "ok b",
-    "proceed", "go", "go ahead", "confirm",
-}
-_NEGATIVE = {
-    "no", "không", "khong", "hủy", "huy", "stop", "cancel", "thôi",
-    "thoi", "khỏi", "khoi", "abort",
-}
-
-
-def _normalize_reply(text: str) -> str:
-    return text.strip().lower().rstrip(".!?。 ")
-
-
-def _is_affirmative(text: str) -> bool:
-    return _normalize_reply(text) in _AFFIRMATIVE
-
-
-def _is_negative(text: str) -> bool:
-    return _normalize_reply(text) in _NEGATIVE
 
 
 # SDK singletons (Phase 1+). main.py calls `init_sdk_singletons(...)` after
@@ -139,22 +113,11 @@ def _footer(tool_count: int, elapsed_s: float) -> str:
 
 
 def _with_footer(reply: str, tool_count: int, t_start: float) -> str:
-    reply = _sanitize_reply_tone(reply)
     if tool_count <= 0:
         return reply
     return f"{reply}\n\n{_footer(tool_count, time.time() - t_start)}"
 
 
-_BANNED_REPLY_PRONOUNS = (
-    (re.compile(r"(?<!\w)tao(?!\w)", re.IGNORECASE), "mình"),
-    (re.compile(r"(?<!\w)mày(?!\w)", re.IGNORECASE), "bạn"),
-)
-
-
-def _sanitize_reply_tone(text: str) -> str:
-    for pattern, replacement in _BANNED_REPLY_PRONOUNS:
-        text = pattern.sub(replacement, text)
-    return text
 _GITHUB_PR_RE = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
 _REPO_SLUG_RE = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b")
 
@@ -170,25 +133,6 @@ def _truncate(text: str, limit: int, *, label: str = "input") -> tuple[str, bool
         + text[-tail:]
     )
     return truncated, True
-
-
-def _looks_like_local_repo_status_question(text: str) -> bool:
-    lowered = text.lower()
-    has_repo = "repo" in lowered or "local" in lowered or "working copy" in lowered
-    asks_status = any(
-        phrase in lowered
-        for phrase in (
-            "có chưa",
-            "co chua",
-            "có repo",
-            "co repo",
-            "có local",
-            "co local",
-            "chưa có repo",
-            "chua co repo",
-        )
-    )
-    return has_repo and asks_status
 
 
 def _repo_from_text_or_history(text: str, messages: list[dict]) -> str | None:
@@ -536,36 +480,6 @@ def _format_action_result(result: ToolResult) -> tuple[str, str, str | None]:
     return f"{icon} {result.user_message}", "error", result.error_code
 
 
-async def _run_pending(
-    pending: dict,
-    *,
-    thread_ts: str | None,
-    channel: str | None,
-    user_id: str | None,
-) -> str:
-    """Resume a previously-saved pending action after user confirmation."""
-    action = Action(type=pending["action_type"], payload=dict(pending["payload"]))
-    t0 = time.time()
-    tool_result = await _run_action(action)
-    display, status, error_code = _format_action_result(tool_result)
-    log_run(
-        agent=f"tool:{action.type}",
-        input_text=str(action.payload),
-        output=display,
-        status=status,
-        duration_ms=int((time.time() - t0) * 1000),
-        thread_ts=thread_ts,
-        channel=channel,
-        user_id=user_id,
-        error=error_code,
-    )
-    if thread_ts:
-        add_message(thread_ts, "assistant", display)
-        if status == "ok":
-            update_thread_fields(thread_ts, last_agent=f"tool:{action.type}")
-    return display
-
-
 def _service_slug_from_registry_text(text: str) -> str | None:
     """Find a registered service mentioned by bare name/alias in text.
 
@@ -755,7 +669,6 @@ async def handle_message(
     text, input_truncated = _truncate(text, settings.max_input_chars, label="input")
     summary: str | None = None
     prior_messages: list[dict] = []
-    pending: dict | None = None
     thread_row: dict | None = None
     if thread_ts:
         touch_thread(thread_ts, channel)
@@ -764,55 +677,7 @@ async def handle_message(
         # Slack thread history (when available) covers non-mention user messages
         # that the DB never sees; fall back to DB if Slack fetch returned nothing.
         prior_messages = thread_history or recent_messages(thread_ts, limit=10)
-        pending = get_pending_confirmation(thread_ts)
-        add_message(thread_ts, "user", text)
     last_agent: str | None = None
-
-    if _looks_like_local_repo_status_question(text):
-        repo = _repo_from_text_or_history(text, prior_messages)
-        action = Action(type="git.check_repo", payload={"repo": repo} if repo else {})
-        t0 = time.time()
-        tool_result = await _run_action(action)
-        tool_count += 1
-        display, status, error_code = _format_action_result(tool_result)
-        log_run(
-            agent="tool:git.check_repo",
-            input_text=str(action.payload),
-            output=display,
-            status=status,
-            duration_ms=int((time.time() - t0) * 1000),
-            thread_ts=thread_ts,
-            channel=channel,
-            user_id=user_id,
-            error=error_code,
-        )
-        if thread_ts:
-            add_message(thread_ts, "assistant", display)
-            if status == "ok":
-                fields: dict = {"last_agent": "tool:git.check_repo"}
-                if repo:
-                    fields["repo"] = repo
-                update_thread_fields(thread_ts, **fields)
-        return _with_footer(display, tool_count, t_start)
-
-    # Resume / cancel a pending confirmation before invoking brain.
-    if pending:
-        if _is_affirmative(text):
-            clear_pending_confirmation(thread_ts)
-            pending_reply = await _run_pending(
-                pending, thread_ts=thread_ts, channel=channel, user_id=user_id
-            )
-            tool_count += 1
-            return _with_footer(pending_reply, tool_count, t_start)
-        if _is_negative(text):
-            clear_pending_confirmation(thread_ts)
-            reply = "Ok đã hủy. Cho mình biết bạn muốn làm gì tiếp nhé."
-            if thread_ts:
-                add_message(thread_ts, "assistant", reply)
-            return reply
-        # Otherwise fall through to brain (treat as new request) but clear pending
-        # so we don't leak it into the next turn.
-        clear_pending_confirmation(thread_ts)
 
     # Resolve any worktree already prepared for the ticket in play. Used both to
     # nudge the brain (route fix/PR to dev) and to run dev inside that worktree.
@@ -1124,18 +989,6 @@ async def handle_message(
                     fields["repo"] = data["github_repo"]
                 if fields:
                     update_thread_fields(thread_ts, **fields)
-            if status == "pending" and thread_ts:
-                data = tool_result.data or {}
-                save_pending_confirmation(
-                    thread_ts,
-                    action_type=data.get("action_type", action.type),
-                    payload=data.get("payload", action.payload),
-                    question=tool_result.user_message or "",
-                )
-                # Surface confirmation question immediately — stop the loop.
-                return _with_footer(
-                    f"❓ {tool_result.user_message}", tool_count, t_start
-                )
             if status == "ok" and _is_fix_pr_request(text, action):
                 tool_count += 1
                 fix_output, fix_status, fix_err = await _run_fix_after_pr_diff(

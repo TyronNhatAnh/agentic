@@ -71,20 +71,6 @@ async def test_dispatcher_clarification(monkeypatch):
     assert "Which repo?" in out
 
 
-async def test_dispatcher_sanitizes_casual_pronouns(monkeypatch):
-    async def casual_reply(msg, *, summary=None, messages=None, workspace_hint=None):
-        return BrainDecision(reply="Muốn tao retry scan cho mày không?", raw="(mocked)")
-
-    monkeypatch.setattr(dispatcher, "decide", casual_reply)
-    out = await dispatcher.handle_message(
-        "hello", thread_ts="t-tone", channel="C1", user_id="U1"
-    )
-
-    assert "Muốn mình retry scan cho bạn không?" in out
-    assert "tao" not in out.lower()
-    assert "mày" not in out.lower()
-
-
 async def test_dispatcher_auto_reviews_fetched_pr_diff(monkeypatch):
     diff = "*PR #431 `gogovan/ggx-kr-user-service` diff*:\n```diff\n+new code\n```"
     seen = {}
@@ -251,39 +237,6 @@ async def test_dev_first_step_receives_thread_analysis_context(monkeypatch):
     assert "app/services/order_service.rb:74" in seen["context"]
     assert "Redis SET NX EX" in seen["context"]
     assert seen["task"] == "fix race condition lock"
-
-
-async def test_dispatcher_checks_local_repo_status_without_jira_ticket(monkeypatch):
-    seen = {}
-
-    async def fail_decide(*args, **kwargs):
-        raise AssertionError("repo status question should bypass brain")
-
-    async def fake_run_action(action):
-        seen["action"] = action
-        return ToolResult.success("Có repo local cho `gogovan/ggx-kr-user-service` nha")
-
-    monkeypatch.setattr(dispatcher, "decide", fail_decide)
-    monkeypatch.setattr(dispatcher, "_run_action", fake_run_action)
-
-    thread_ts = "t-repo-status"
-    await dispatcher.handle_message(
-        "review pr https://github.com/gogovan/ggx-kr-user-service/pull/431",
-        thread_ts=thread_ts,
-        channel="C1",
-        user_id="U1",
-    )
-
-    out = await dispatcher.handle_message(
-        "ko cần jira tui đang hỏi có repo chưa thôi",
-        thread_ts=thread_ts,
-        channel="C1",
-        user_id="U1",
-    )
-
-    assert "Có repo local" in out
-    assert seen["action"].type == "git.check_repo"
-    assert seen["action"].payload == {"repo": "gogovan/ggx-kr-user-service"}
 
 
 def test_seeded_service_resolves_by_github_repo():
