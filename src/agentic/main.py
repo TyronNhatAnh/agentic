@@ -12,6 +12,7 @@ from .sdk import (
     PendingPermissions,
     SqliteSessionStore,
     ThreadSessionManager,
+    make_brain_options_factory,
     make_dev_options_factory,
 )
 from .slack_handlers import register
@@ -79,11 +80,17 @@ async def _main() -> None:
         slack_client=app.client,
     )
     pool = ThreadSessionManager(factory)
-    init_sdk_singletons(pool=pool, pending=pending)
+    brain_factory = make_brain_options_factory(
+        pending=pending,
+        session_store=session_store,
+        slack_client=app.client,
+    )
+    brain_pool = ThreadSessionManager(brain_factory)
+    init_sdk_singletons(pool=pool, pending=pending, brain_pool=brain_pool)
 
     register(app, runner, pending=pending)
     sweeper = asyncio.create_task(
-        _sdk_idle_sweeper(pool), name="agentic-sdk-idle-sweep"
+        _sdk_idle_sweeper(pool, brain_pool), name="agentic-sdk-idle-sweep"
     )
     handler = AsyncSocketModeHandler(app, settings.slack_app_token)
     logging.getLogger(__name__).info(
@@ -96,18 +103,20 @@ async def _main() -> None:
     finally:
         sweeper.cancel()
         await pool.shutdown_all()
+        await brain_pool.shutdown_all()
 
 
-async def _sdk_idle_sweeper(pool: ThreadSessionManager) -> None:
+async def _sdk_idle_sweeper(*pools: ThreadSessionManager) -> None:
     """Reap idle SDK sessions every minute so subprocess slots free up."""
     while True:
         try:
             await asyncio.sleep(60)
-            closed = await pool.sweep_idle()
-            if closed:
-                logging.getLogger(__name__).info(
-                    "sdk idle sweep closed %d session(s)", closed
-                )
+            for pool in pools:
+                closed = await pool.sweep_idle()
+                if closed:
+                    logging.getLogger(__name__).info(
+                        "sdk idle sweep closed %d session(s)", closed
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:

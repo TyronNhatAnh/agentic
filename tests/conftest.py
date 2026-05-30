@@ -14,3 +14,6 @@ import tempfile
 os.environ.setdefault("AGENTIC_DB", tempfile.mktemp(suffix=".db"))
 # Non-existent path → _load_service_seeds() returns [] (no seeding).
 os.environ.setdefault("AGENTIC_SERVICES_JSON", tempfile.mktemp(suffix=".json"))
+# Force legacy path unless a test opts in via monkeypatch. Process env wins over
+# the developer's `.env` in pydantic-settings priority order.
+os.environ["AGENTIC_USE_SDK"] = "false"

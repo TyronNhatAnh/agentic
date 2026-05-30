@@ -15,7 +15,12 @@ from .integrations import git as git_int
 from .integrations import github, grafana, jira
 from .integrations import ship as ship_int
 from .integrations.result import ToolResult
-from .sdk import PendingPermissions, ThreadSessionManager, run_dev_sdk
+from .sdk import (
+    PendingPermissions,
+    ThreadSessionManager,
+    run_brain_session,
+    run_dev_sdk,
+)
 from .store import (
     add_message,
     clear_pending_confirmation,
@@ -57,6 +62,7 @@ def _is_negative(text: str) -> bool:
 # SDK singletons (Phase 1+). main.py calls `init_sdk_singletons(...)` after
 # init_db; tests and the legacy code path can leave them unset (None).
 _pool: ThreadSessionManager | None = None
+_brain_pool: ThreadSessionManager | None = None
 _pending: PendingPermissions | None = None
 
 
@@ -64,14 +70,20 @@ def init_sdk_singletons(
     *,
     pool: ThreadSessionManager,
     pending: PendingPermissions,
+    brain_pool: ThreadSessionManager | None = None,
 ) -> None:
-    global _pool, _pending
+    global _pool, _pending, _brain_pool
     _pool = pool
     _pending = pending
+    _brain_pool = brain_pool
 
 
 def _pool_singleton() -> ThreadSessionManager | None:
     return _pool
+
+
+def _brain_pool_singleton() -> ThreadSessionManager | None:
+    return _brain_pool
 
 
 def _pending_singleton() -> PendingPermissions | None:
@@ -813,6 +825,58 @@ async def handle_message(
         if workspace.get("github_repo") and not (thread_row or {}).get("repo"):
             fields["repo"] = workspace["github_repo"]
         update_thread_fields(thread_ts, **fields)
+
+    if settings.use_sdk:
+        if slack_client is None or not placeholder_ts:
+            raise RuntimeError(
+                "AGENTIC_USE_SDK=true requires slack_client + placeholder_ts "
+                "from Job (worker must forward them)"
+            )
+        brain_pool = _brain_pool_singleton()
+        pending_perms = _pending_singleton()
+        if brain_pool is None or pending_perms is None:
+            raise RuntimeError(
+                "AGENTIC_USE_SDK=true but SDK brain singletons not initialized "
+                "(main.py must call init_sdk_singletons with brain_pool)"
+            )
+        brain_result = await run_brain_session(
+            user_text=text,
+            thread_ts=thread_ts or "",
+            channel_id=channel or "",
+            slack_client=slack_client,
+            placeholder_ts=placeholder_ts,
+            thread_history=thread_history or [],
+            workspace_hint=_workspace_brain_hint(workspace) if workspace else None,
+            pool=brain_pool,
+            pending=pending_perms,
+        )
+        log_run(
+            agent="brain",
+            input_text=text,
+            output=brain_result.reply,
+            status="error" if brain_result.error else "ok",
+            duration_ms=brain_result.duration_ms,
+            thread_ts=thread_ts,
+            channel=channel,
+            user_id=user_id,
+            error=brain_result.error,
+        )
+        for tc in brain_result.tool_calls:
+            log_run(
+                agent=tc.name,
+                input_text=tc.input_preview,
+                output=None,
+                status="ok" if tc.ok else "error",
+                duration_ms=tc.duration_ms,
+                thread_ts=thread_ts,
+                channel=channel,
+                user_id=user_id,
+                error=tc.error,
+            )
+        reply_text = brain_result.reply or "(no output)"
+        if brain_result.error:
+            reply_text = f"{reply_text}\n\n⚠️ {brain_result.error}".strip()
+        return _with_footer(reply_text, len(brain_result.tool_calls) + 1, t_start)
 
     await _progress(progress, "🧠 Brain đang phân tích...")
     started = time.time()

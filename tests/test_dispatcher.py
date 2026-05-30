@@ -452,3 +452,90 @@ async def test_synthesize_injects_grounding_rules_for_logs(monkeypatch):
         summary=None,
     )
     assert "XUẤT HIỆN NGUYÊN VĂN" not in captured["system"]
+
+
+async def test_dispatcher_sdk_gate_calls_brain_session(monkeypatch):
+    """When settings.use_sdk=True, dispatcher delegates to run_brain_session
+    instead of the legacy ReAct loop and logs brain + each tool_call."""
+    from agentic.sdk.brain_session import BrainResult, ToolCallRecord
+    from agentic import store
+
+    monkeypatch.setattr(dispatcher.settings, "use_sdk", True)
+    monkeypatch.setattr(
+        dispatcher, "_brain_pool_singleton", lambda: object()
+    )
+    monkeypatch.setattr(
+        dispatcher, "_pending_singleton", lambda: object()
+    )
+
+    # Legacy entry points must NOT be called on the SDK path.
+    async def boom_decide(*a, **kw):
+        raise AssertionError("legacy decide() should not run on SDK path")
+    monkeypatch.setattr(dispatcher, "decide", boom_decide)
+
+    captured_brain_args: dict = {}
+
+    async def fake_run_brain_session(**kwargs):
+        captured_brain_args.update(kwargs)
+        return BrainResult(
+            reply="hello from sdk",
+            session_id="sess-xyz",
+            usage={"input_tokens": 10},
+            cost_usd=0.0,
+            duration_ms=123,
+            num_turns=1,
+            tool_calls=[
+                ToolCallRecord(
+                    name="github_get_pr",
+                    input_preview='{"pr": 1}',
+                    ok=True,
+                    duration_ms=50,
+                ),
+                ToolCallRecord(
+                    name="jira_get_issue",
+                    input_preview='{"key": "X-1"}',
+                    ok=False,
+                    duration_ms=20,
+                    error="NOT_FOUND",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(dispatcher, "run_brain_session", fake_run_brain_session)
+
+    logged: list[dict] = []
+    real_log_run = store.log_run
+
+    def capture_log_run(**kwargs):
+        logged.append(kwargs)
+        return real_log_run(**kwargs)
+
+    monkeypatch.setattr(dispatcher, "log_run", capture_log_run)
+
+    out = await dispatcher.handle_message(
+        "ping",
+        thread_ts="t-sdk",
+        channel="C1",
+        user_id="U1",
+        slack_client=object(),
+        placeholder_ts="1700000000.0",
+    )
+
+    assert "hello from sdk" in out
+    assert captured_brain_args["user_text"] == "ping"
+    assert captured_brain_args["thread_ts"] == "t-sdk"
+
+    # brain + 2 tool_calls = 3 log_run entries
+    agents = [e["agent"] for e in logged]
+    assert agents == ["brain", "github_get_pr", "jira_get_issue"]
+    assert logged[0]["status"] == "ok"
+    assert logged[2]["status"] == "error"
+    assert logged[2]["error"] == "NOT_FOUND"
+
+
+async def test_dispatcher_sdk_gate_fails_fast_without_slack_handle(monkeypatch):
+    monkeypatch.setattr(dispatcher.settings, "use_sdk", True)
+    with pytest.raises(RuntimeError, match="slack_client"):
+        await dispatcher.handle_message(
+            "ping", thread_ts="t-x", channel="C1", user_id="U1"
+        )
