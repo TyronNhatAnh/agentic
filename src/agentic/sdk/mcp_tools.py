@@ -1,50 +1,806 @@
 """In-process MCP server exposing integration verbs as typed SDK tools.
 
-Phase 0: one sample tool (`github_get_pr`) — enough to prove the @tool +
-create_sdk_mcp_server path works end-to-end in the smoke test.
+Phase 2: every legacy ``integrations/*.execute_action`` verb is exposed 1-to-1
+as an ``@tool`` with a JSON Schema input. The brain stops parsing JSON action
+blobs and starts calling these tools via SDK function calling. Retry is owned
+here (read-only verbs only) so Claude never burns tokens on transient jitter
+and the conversation prefix stays cache-stable.
 
-Phase 2: convert all integrations/*.execute_action verbs 1-to-1 to @tool with
-typed input_schema. The brain stops parsing JSON and starts calling tools.
+Naming: ``<integration>_<verb>`` snake_case — MCP tool names cannot contain
+``.``, and snake_case matches ``CONFIRM_TOOLS`` in ``permission.py``. The
+mapping to legacy ``action_type`` is a literal ``.`` ↔ ``_`` swap.
+
+Confirm contract (§12.I): ``github_approve_pr`` and ``github_merge_pr`` are
+invoked with ``confirmed=True`` here — Phase 1 ``can_use_tool`` callback owns
+the user prompt. ``git_prepare_workspace`` and ``git_commit`` also pass
+``confirmed=True`` because the SDK path does not bubble ``NEEDS_CONFIRMATION``
+results to Slack; if those tools need a guard later, add them to
+``CONFIRM_TOOLS`` rather than re-enabling the legacy prompt.
 """
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import logging
+from typing import Any, Awaitable, Callable
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from ..integrations import git as git_int
 from ..integrations import github as github_int
+from ..integrations import grafana as grafana_int
+from ..integrations import jira as jira_int
+from ..integrations import ship as ship_int
+from ..integrations.result import ToolResult, classify_exception
+
+log = logging.getLogger(__name__)
+
+# Match dispatcher.py:103-104 legacy semantics — read-only verbs retry up to
+# 2 times on transient errors, write verbs never retry (timed-out POST may
+# have succeeded server-side, retry would duplicate).
+_MAX_RETRIES = 2
+_RETRY_BACKOFF_S = (0.5, 1.5)
 
 
 def _ok(text: str) -> dict[str, Any]:
-    return {"content": [{"type": "text", "text": text}]}
+    return {"content": [{"type": "text", "text": text or ""}]}
 
 
 def _err(text: str) -> dict[str, Any]:
-    return {"content": [{"type": "text", "text": text}], "is_error": True}
+    return {"content": [{"type": "text", "text": text or "error"}], "is_error": True}
+
+
+async def _run_with_retry(
+    fn: Callable[[], Awaitable[Any]],
+    *,
+    retryable_read: bool,
+    service: str,
+) -> dict[str, Any]:
+    """Call a legacy integration fn. Translate ``ToolResult`` → MCP content.
+
+    Read-only verbs retry transient ``retryable=True`` failures
+    (TIMEOUT/NETWORK/SERVER/RATE_LIMIT) up to ``_MAX_RETRIES`` with backoff.
+    Write verbs (``retryable_read=False``) never retry. Raw exceptions are
+    classified via ``classify_exception`` so the brain sees AUTH/CONFIG/etc.
+    instead of a stack trace.
+    """
+    last: ToolResult | None = None
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            result = await fn()
+        except Exception as e:  # noqa: BLE001 — boundary, want all
+            result = classify_exception(e, service=service)
+
+        if isinstance(result, str):
+            return _ok(result)
+        if not isinstance(result, ToolResult):
+            return _ok(str(result))
+
+        last = result
+        if result.ok:
+            return _ok(result.display())
+
+        if (
+            not retryable_read
+            or not result.retryable
+            or attempt >= _MAX_RETRIES
+        ):
+            break
+        delay = _RETRY_BACKOFF_S[min(attempt, len(_RETRY_BACKOFF_S) - 1)]
+        log.info(
+            "mcp tool %s retry %d/%d after %.1fs (%s)",
+            service, attempt + 1, _MAX_RETRIES, delay, result.error_code,
+        )
+        await asyncio.sleep(delay)
+
+    assert last is not None
+    msg = f"[{last.error_code}] {last.user_message or ''}".strip()
+    return _err(msg)
+
+
+# ============================================================================
+# GitHub (13)
+# ============================================================================
+
+@tool(
+    "github_create_issue",
+    "Create a new GitHub issue. Use when the user asks to file/open a bug or task.",
+    {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "body": {"type": "string"},
+            "repo": {"type": "string", "description": "owner/repo; defaults to GITHUB_DEFAULT_REPO"},
+        },
+        "required": ["title", "body"],
+    },
+)
+async def github_create_issue(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: github_int.create_issue(args["title"], args["body"], args.get("repo")),
+        retryable_read=False, service="GitHub",
+    )
+
+
+@tool(
+    "github_create_pr",
+    "Open a new pull request. Use only when there's no local worktree — otherwise prefer ship_create_pr.",
+    {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "head": {"type": "string", "description": "feature branch name"},
+            "base": {"type": "string", "description": "target branch, e.g. releases/DAPro-2.X"},
+            "body": {"type": "string"},
+            "repo": {"type": "string"},
+            "draft": {"type": "boolean"},
+        },
+        "required": ["title", "head", "base"],
+    },
+)
+async def github_create_pr(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: github_int.create_pr(
+            args["title"], args["head"], args["base"],
+            args.get("body", ""), args.get("repo"),
+            bool(args.get("draft", False)),
+        ),
+        retryable_read=False, service="GitHub",
+    )
+
+
+@tool(
+    "github_comment_pr",
+    "Post a comment on a pull request.",
+    {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "body": {"type": "string"},
+            "repo": {"type": "string"},
+        },
+        "required": ["pr", "body"],
+    },
+)
+async def github_comment_pr(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: github_int.comment_pr(args["pr"], args["body"], args.get("repo")),
+        retryable_read=False, service="GitHub",
+    )
+
+
+@tool(
+    "github_approve_pr",
+    "Submit an APPROVE review on a pull request. User confirmation is handled by the permission callback — do not ask twice.",
+    {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "repo": {"type": "string"},
+            "body": {"type": "string", "description": "optional approval comment"},
+        },
+        "required": ["pr"],
+    },
+)
+async def github_approve_pr(args: dict[str, Any]) -> dict[str, Any]:
+    # confirmed=True: SDK can_use_tool callback (§12.A) gated this call already.
+    return await _run_with_retry(
+        lambda: github_int.approve_pr(
+            args["pr"], args.get("repo"), args.get("body", ""), confirmed=True,
+        ),
+        retryable_read=False, service="GitHub",
+    )
+
+
+@tool(
+    "github_merge_pr",
+    "Merge a pull request. Re-checks mergeable_state — refuses dirty/blocked/behind/draft. User confirmation is handled by the permission callback.",
+    {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "repo": {"type": "string"},
+            "method": {"type": "string", "enum": ["squash", "merge", "rebase"]},
+            "commit_title": {"type": "string"},
+            "commit_message": {"type": "string"},
+        },
+        "required": ["pr"],
+    },
+)
+async def github_merge_pr(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: github_int.merge_pr(
+            args["pr"], args.get("repo"),
+            args.get("method", "squash"),
+            args.get("commit_title", ""),
+            args.get("commit_message", ""),
+            confirmed=True,
+        ),
+        retryable_read=False, service="GitHub",
+    )
+
+
+@tool(
+    "github_update_pr",
+    "Update an existing PR's base/title/body/draft. At least one of base/title/body/draft must be supplied.",
+    {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "repo": {"type": "string"},
+            "base": {"type": "string"},
+            "title": {"type": "string"},
+            "body": {"type": "string"},
+            "draft": {"type": "boolean"},
+        },
+        "required": ["pr"],
+    },
+)
+async def github_update_pr(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: github_int.update_pr(
+            args["pr"], args.get("repo"),
+            args.get("base"), args.get("title"),
+            args.get("body"),
+            args["draft"] if "draft" in args else None,
+        ),
+        retryable_read=False, service="GitHub",
+    )
+
+
+@tool(
+    "github_list_my_prs",
+    "List PRs where the bot user is author/assignee/reviewer.",
+    {
+        "type": "object",
+        "properties": {
+            "state": {"type": "string", "enum": ["open", "closed", "all"]},
+        },
+        "required": [],
+    },
+)
+async def github_list_my_prs(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: github_int.list_my_prs(args.get("state", "open")),
+        retryable_read=True, service="GitHub",
+    )
+
+
+@tool(
+    "github_list_prs",
+    "List PRs in a repo, optionally filtered by author.",
+    {
+        "type": "object",
+        "properties": {
+            "repo": {"type": "string"},
+            "state": {"type": "string", "enum": ["open", "closed", "all"]},
+            "author": {"type": "string"},
+        },
+        "required": ["repo"],
+    },
+)
+async def github_list_prs(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: github_int.list_prs(
+            args["repo"], args.get("state", "open"), args.get("author"),
+        ),
+        retryable_read=True, service="GitHub",
+    )
+
+
+@tool(
+    "github_list_issues",
+    "List issues in a repo, optionally filtered by assignee/label.",
+    {
+        "type": "object",
+        "properties": {
+            "repo": {"type": "string"},
+            "state": {"type": "string", "enum": ["open", "closed", "all"]},
+            "assignee": {"type": "string"},
+            "label": {"type": "string"},
+        },
+        "required": ["repo"],
+    },
+)
+async def github_list_issues(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: github_int.list_issues(
+            args["repo"], args.get("state", "open"),
+            args.get("assignee"), args.get("label"),
+        ),
+        retryable_read=True, service="GitHub",
+    )
+
+
+@tool(
+    "github_list_notifications",
+    "List the bot's GitHub notification inbox. Set all=true for read+unread.",
+    {
+        "type": "object",
+        "properties": {"all": {"type": "boolean"}},
+        "required": [],
+    },
+)
+async def github_list_notifications(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: github_int.list_notifications(bool(args.get("all", False))),
+        retryable_read=True, service="GitHub",
+    )
+
+
+@tool(
+    "github_search",
+    "GitHub /search/issues query. Use full GitHub search syntax in `query`.",
+    {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "kind": {"type": "string", "description": "label for the result section"},
+        },
+        "required": ["query"],
+    },
+)
+async def github_search(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: github_int.search(args["query"], args.get("kind", "search")),
+        retryable_read=True, service="GitHub",
+    )
 
 
 @tool(
     "github_get_pr",
-    "Fetch a GitHub pull request's title, body, state, and metadata. "
-    "Use when the user mentions a PR number or link.",
-    {"pr": int, "repo": str},
+    "Fetch a PR's title, body, state, head/base, author. Use when the user references a PR number or link.",
+    {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "repo": {"type": "string"},
+        },
+        "required": ["pr"],
+    },
 )
 async def github_get_pr(args: dict[str, Any]) -> dict[str, Any]:
-    try:
-        text = await github_int.get_pr(int(args["pr"]), repo=args.get("repo") or None)
-        return _ok(text)
-    except Exception as e:  # surface as tool error, not a Python crash
-        return _err(f"github.get_pr failed: {e}")
+    return await _run_with_retry(
+        lambda: github_int.get_pr(args["pr"], args.get("repo")),
+        retryable_read=True, service="GitHub",
+    )
+
+
+@tool(
+    "github_get_pr_diff",
+    "Fetch a PR's unified diff, truncated to max_chars (default 20000).",
+    {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "repo": {"type": "string"},
+            "max_chars": {"type": "integer"},
+        },
+        "required": ["pr"],
+    },
+)
+async def github_get_pr_diff(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: github_int.get_pr_diff(
+            args["pr"], args.get("repo"), int(args.get("max_chars", 20000)),
+        ),
+        retryable_read=True, service="GitHub",
+    )
+
+
+# ============================================================================
+# Jira (10)
+# ============================================================================
+
+@tool(
+    "jira_list_my_issues",
+    "List Jira issues assigned to the bot user.",
+    {
+        "type": "object",
+        "properties": {"state": {"type": "string"}},
+        "required": [],
+    },
+)
+async def jira_list_my_issues(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.list_my_issues(args.get("state", "open")),
+        retryable_read=True, service="Jira",
+    )
+
+
+@tool(
+    "jira_list_my_in_progress",
+    "List the bot user's in-progress Jira issues.",
+    {"type": "object", "properties": {}, "required": []},
+)
+async def jira_list_my_in_progress(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.list_my_in_progress(),
+        retryable_read=True, service="Jira",
+    )
+
+
+@tool(
+    "jira_list_my_sprint",
+    "List the bot user's issues in the active sprint, optionally filtered by status.",
+    {
+        "type": "object",
+        "properties": {"status": {"type": "string"}},
+        "required": [],
+    },
+)
+async def jira_list_my_sprint(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.list_my_sprint(args.get("status")),
+        retryable_read=True, service="Jira",
+    )
+
+
+@tool(
+    "jira_list_project_in_progress",
+    "List in-progress Jira issues across a project.",
+    {
+        "type": "object",
+        "properties": {"project": {"type": "string"}},
+        "required": [],
+    },
+)
+async def jira_list_project_in_progress(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.list_project_in_progress(args.get("project")),
+        retryable_read=True, service="Jira",
+    )
+
+
+@tool(
+    "jira_get_issue",
+    "Fetch a Jira issue by key (ABC-123).",
+    {
+        "type": "object",
+        "properties": {"key": {"type": "string"}},
+        "required": ["key"],
+    },
+)
+async def jira_get_issue(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.get_issue(args["key"]),
+        retryable_read=True, service="Jira",
+    )
+
+
+@tool(
+    "jira_search",
+    "Run a JQL search. Use full Jira JQL in `jql`.",
+    {
+        "type": "object",
+        "properties": {
+            "jql": {"type": "string"},
+            "max_results": {"type": "integer"},
+            "kind": {"type": "string"},
+        },
+        "required": ["jql"],
+    },
+)
+async def jira_search(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.search_jql(
+            args["jql"], int(args.get("max_results", 20)),
+            args.get("kind", "Kết quả"),
+        ),
+        retryable_read=True, service="Jira",
+    )
+
+
+@tool(
+    "jira_create_issue",
+    "Create a new Jira issue.",
+    {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "description": {"type": "string"},
+            "project": {"type": "string"},
+            "issue_type": {"type": "string"},
+        },
+        "required": ["summary"],
+    },
+)
+async def jira_create_issue(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.create_issue(
+            args["summary"], args.get("description", ""),
+            args.get("project"), args.get("issue_type", "Task"),
+        ),
+        retryable_read=False, service="Jira",
+    )
+
+
+@tool(
+    "jira_comment_issue",
+    "Post a comment on a Jira issue.",
+    {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string"},
+            "body": {"type": "string"},
+        },
+        "required": ["key", "body"],
+    },
+)
+async def jira_comment_issue(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.comment_issue(args["key"], args["body"]),
+        retryable_read=False, service="Jira",
+    )
+
+
+@tool(
+    "jira_list_transitions",
+    "List available workflow transitions for a Jira issue.",
+    {
+        "type": "object",
+        "properties": {"key": {"type": "string"}},
+        "required": ["key"],
+    },
+)
+async def jira_list_transitions(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.list_transitions(args["key"]),
+        retryable_read=True, service="Jira",
+    )
+
+
+@tool(
+    "jira_transition_issue",
+    "Move a Jira issue to a target status name (case-insensitive match against transition name or destination status).",
+    {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string"},
+            "target_status": {"type": "string"},
+        },
+        "required": ["key", "target_status"],
+    },
+)
+async def jira_transition_issue(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.transition_issue(args["key"], args["target_status"]),
+        retryable_read=False, service="Jira",
+    )
+
+
+# ============================================================================
+# Git (5)
+# ============================================================================
+
+@tool(
+    "git_check_repo",
+    "Inspect a local service repo: current branch, uncommitted changes, remotes. Supply either service (from service_repos) or repo path.",
+    {
+        "type": "object",
+        "properties": {
+            "service": {"type": "string"},
+            "repo": {"type": "string"},
+        },
+        "required": [],
+    },
+)
+async def git_check_repo(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: git_int.check_repo(args.get("service"), args.get("repo")),
+        retryable_read=True, service="git",
+    )
+
+
+@tool(
+    "git_prepare_workspace",
+    "Create a worktree + feature/<ticket> branch for a service. Base auto-resolved from Jira sprint (releases/DAPro-2.<sprint>).",
+    {
+        "type": "object",
+        "properties": {
+            "service": {"type": "string"},
+            "ticket": {"type": "string", "description": "Jira key ABC-123"},
+        },
+        "required": ["service", "ticket"],
+    },
+)
+async def git_prepare_workspace(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: git_int.prepare_workspace(args["service"], args["ticket"], confirmed=True),
+        retryable_read=False, service="git",
+    )
+
+
+@tool(
+    "git_prepare_pr_review_workspace",
+    "Clone/checkout a PR head into a review worktree so review agents can inspect files.",
+    {
+        "type": "object",
+        "properties": {
+            "repo": {"type": "string"},
+            "pr": {"type": "integer"},
+        },
+        "required": ["repo", "pr"],
+    },
+)
+async def git_prepare_pr_review_workspace(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: git_int.prepare_pr_review_workspace(args["repo"], int(args["pr"])),
+        retryable_read=False, service="git",
+    )
+
+
+@tool(
+    "git_commit",
+    "Stage and commit all changes in the worktree for service/feature-<ticket>.",
+    {
+        "type": "object",
+        "properties": {
+            "service": {"type": "string"},
+            "ticket": {"type": "string", "description": "branch suffix after feature/"},
+            "message": {"type": "string"},
+        },
+        "required": ["service", "ticket", "message"],
+    },
+)
+async def git_commit(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: git_int.commit_branch(
+            args["service"], args["ticket"], args["message"], confirmed=True,
+        ),
+        retryable_read=False, service="git",
+    )
+
+
+@tool(
+    "git_push",
+    "Push feature/<ticket> to origin. Uses GITHUB_TOKEN auth, no SSH required.",
+    {
+        "type": "object",
+        "properties": {
+            "service": {"type": "string"},
+            "ticket": {"type": "string", "description": "branch suffix after feature/"},
+        },
+        "required": ["service", "ticket"],
+    },
+)
+async def git_push(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: git_int.push_branch(args["service"], args["ticket"]),
+        retryable_read=False, service="git",
+    )
+
+
+# ============================================================================
+# Grafana (2)
+# ============================================================================
+
+@tool(
+    "grafana_search_logs",
+    (
+        "Query Loki via Grafana for logs. Provide either `query` (full LogQL) or "
+        "`service` + optional `filter` (line filter expression like `|= \"error\"` "
+        "or `|~ \"(?i)error|exception\"`). Times use Grafana shorthand "
+        "(`now`, `now-1h`, `now-30m`). Read-only — no confirm."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "raw LogQL — overrides service+filter"},
+            "env": {"type": "string", "enum": ["stag", "prod"]},
+            "since": {"type": "string"},
+            "until": {"type": "string"},
+            "limit": {"type": "integer"},
+            "direction": {"type": "string", "enum": ["backward", "forward"]},
+            "datasource_uid": {"type": "string"},
+            "service": {"type": "string"},
+            "filter": {"type": "string", "description": "LogQL line filter, e.g. |= \"error\""},
+        },
+        "required": [],
+    },
+)
+async def grafana_search_logs(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: grafana_int.search_logs(
+            query=args.get("query", ""),
+            env=args.get("env", "stag"),
+            since=args.get("since", "now-1h"),
+            until=args.get("until", "now"),
+            limit=int(args.get("limit", 200)),
+            direction=args.get("direction", "backward"),
+            datasource_uid=args.get("datasource_uid"),
+            service=args.get("service", ""),
+            log_filter=args.get("filter", ""),
+        ),
+        retryable_read=True, service="Grafana",
+    )
+
+
+@tool(
+    "grafana_list_datasources",
+    "List Grafana datasources for an environment. Use to find a Loki datasource UID.",
+    {
+        "type": "object",
+        "properties": {"env": {"type": "string", "enum": ["stag", "prod"]}},
+        "required": [],
+    },
+)
+async def grafana_list_datasources(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: grafana_int.list_datasources(args.get("env", "stag")),
+        retryable_read=True, service="Grafana",
+    )
+
+
+# ============================================================================
+# Ship (1)
+# ============================================================================
+
+@tool(
+    "ship_create_pr",
+    (
+        "Open a PR from an existing local worktree (service+ticket). Auto-resolves base "
+        "from Jira sprint (releases/DAPro-2.<sprint>) and transitions the Jira issue to "
+        "Code Review on success. Prefer this over github_create_pr when a worktree exists."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "service": {"type": "string"},
+            "ticket": {"type": "string"},
+            "pr_title": {"type": "string"},
+            "commit_message": {"type": "string"},
+            "pr_body": {"type": "string"},
+            "base": {"type": "string"},
+            "target_status": {"type": "string"},
+            "draft": {"type": "boolean"},
+        },
+        "required": ["service", "ticket", "pr_title"],
+    },
+)
+async def ship_create_pr(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: ship_int.create_pr(
+            args["service"], args["ticket"], args["pr_title"],
+            args.get("commit_message", ""), args.get("pr_body", ""),
+            args.get("base"),
+            args.get("target_status", "Code Review"),
+            bool(args.get("draft", False)),
+        ),
+        retryable_read=False, service="ship",
+    )
+
+
+# ============================================================================
+# Aggregator
+# ============================================================================
+
+_ALL_TOOLS = [
+    # github (13)
+    github_create_issue, github_create_pr, github_comment_pr,
+    github_approve_pr, github_merge_pr, github_update_pr,
+    github_list_my_prs, github_list_prs, github_list_issues,
+    github_list_notifications, github_search,
+    github_get_pr, github_get_pr_diff,
+    # jira (10)
+    jira_list_my_issues, jira_list_my_in_progress, jira_list_my_sprint,
+    jira_list_project_in_progress, jira_get_issue, jira_search,
+    jira_create_issue, jira_comment_issue,
+    jira_list_transitions, jira_transition_issue,
+    # git (5)
+    git_check_repo, git_prepare_workspace, git_prepare_pr_review_workspace,
+    git_commit, git_push,
+    # grafana (2)
+    grafana_search_logs, grafana_list_datasources,
+    # ship (1)
+    ship_create_pr,
+]
 
 
 def build_agentic_mcp_server():
-    """Return the in-process MCP server config to pass into ClaudeAgentOptions.
-
-    Phase 0: only `github_get_pr`. Phase 2 expands to the full integration set.
-    """
+    """Return the in-process MCP server config for ``ClaudeAgentOptions.mcp_servers``."""
     return create_sdk_mcp_server(
         name="agentic",
-        version="0.1.0",
-        tools=[github_get_pr],
+        version="0.2.0",
+        tools=_ALL_TOOLS,
     )
