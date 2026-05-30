@@ -13,7 +13,6 @@ from .sdk import (
     SqliteSessionStore,
     ThreadSessionManager,
     make_brain_options_factory,
-    make_dev_options_factory,
 )
 from .slack_handlers import register
 from .store import init_db
@@ -68,41 +67,33 @@ async def _main() -> None:
     runner = JobRunner(handle_message, concurrency=settings.worker_concurrency)
     runner.start()
 
-    # SDK singletons: wired regardless of the use_sdk flag so the Slack
-    # perm_allow/perm_deny button handlers exist (no-op when no Future is
-    # pending). The pool's ClaudeSDKClient instances are created lazily on
-    # first use, so this stays cheap when the flag is off.
+    # SDK singletons. The Slack perm_allow/perm_deny button handlers need the
+    # PendingPermissions instance; the brain pool's ClaudeSDKClient instances are
+    # created lazily per thread on first use. dev/review/po/ba are
+    # AgentDefinitions inside the brain session — there is no separate dev pool.
     session_store = SqliteSessionStore()
     pending = PendingPermissions()
-    factory = make_dev_options_factory(
-        pending=pending,
-        session_store=session_store,
-        slack_client=app.client,
-    )
-    pool = ThreadSessionManager(factory)
     brain_factory = make_brain_options_factory(
         pending=pending,
         session_store=session_store,
         slack_client=app.client,
     )
     brain_pool = ThreadSessionManager(brain_factory)
-    init_sdk_singletons(pool=pool, pending=pending, brain_pool=brain_pool)
+    init_sdk_singletons(brain_pool=brain_pool, pending=pending)
 
     register(app, runner, pending=pending)
     sweeper = asyncio.create_task(
-        _sdk_idle_sweeper(pool, brain_pool), name="agentic-sdk-idle-sweep"
+        _sdk_idle_sweeper(brain_pool), name="agentic-sdk-idle-sweep"
     )
     handler = AsyncSocketModeHandler(app, settings.slack_app_token)
     logging.getLogger(__name__).info(
-        "⚡️ Bolt app started (Socket Mode), workers=%d sdk=%s",
+        "⚡️ Bolt app started (Socket Mode), workers=%d",
         settings.worker_concurrency,
-        "on" if settings.use_sdk else "off",
     )
     try:
         await handler.start_async()
     finally:
         sweeper.cancel()
-        await pool.shutdown_all()
         await brain_pool.shutdown_all()
 
 

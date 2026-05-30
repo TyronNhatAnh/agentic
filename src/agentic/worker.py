@@ -17,11 +17,9 @@ class Job:
     channel: str
     user_id: str | None
     reply: ReplyFn
-    progress: ReplyFn | None = None
-    progress_messages: list[str] = field(default_factory=list)
     thread_history: list[dict] = field(default_factory=list)
-    # SDK path (Phase 1+) needs raw Slack access to stream into the placeholder
-    # and post permission-button messages. Legacy `claude -p` path ignores these.
+    # The brain session streams partial replies straight into the placeholder
+    # and posts permission-button messages, so it needs raw Slack access.
     slack_client: Any = None
     placeholder_ts: str | None = None
 
@@ -52,19 +50,13 @@ class JobRunner:
         log.info("worker %d started", idx)
         while True:
             job = await self._queue.get()
-            progress_task: asyncio.Task | None = None
             try:
-                if job.progress:
-                    progress_task = asyncio.create_task(
-                        self._progress_loop(job), name=f"agentic-progress-{idx}"
-                    )
                 reply = await self._handler(
                     job.text,
                     thread_ts=job.thread_ts,
                     channel=job.channel,
                     user_id=job.user_id,
                     thread_history=job.thread_history,
-                    progress=job.progress,
                     slack_client=job.slack_client,
                     placeholder_ts=job.placeholder_ts,
                 )
@@ -82,29 +74,5 @@ class JobRunner:
                 except Exception:
                     log.exception("worker %d fallback reply also failed", idx)
             finally:
-                if progress_task:
-                    progress_task.cancel()
-                    try:
-                        await progress_task
-                    except asyncio.CancelledError:
-                        pass
                 self._busy.discard(job.thread_ts)
                 self._queue.task_done()
-
-    async def _progress_loop(self, job: Job) -> None:
-        messages = job.progress_messages or ["⏳ Đang xử lý..."]
-        try:
-            for i, msg in enumerate(messages):
-                await asyncio.sleep(5 if i == 0 else 10)
-                if job.progress:
-                    await job.progress(msg)
-            i = len(messages)
-            while True:
-                await asyncio.sleep(10)
-                if job.progress:
-                    await job.progress(messages[-1])
-                i += 1
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("progress update failed")

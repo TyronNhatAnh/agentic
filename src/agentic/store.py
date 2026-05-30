@@ -60,14 +60,6 @@ CREATE TABLE IF NOT EXISTS service_repos (
     aliases TEXT,
     loki_selector TEXT
 );
-
-CREATE TABLE IF NOT EXISTS pending_confirmations (
-    thread_ts TEXT PRIMARY KEY,
-    action_type TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    question TEXT NOT NULL,
-    created_at REAL NOT NULL
-);
 """
 
 def _load_service_seeds() -> list[dict]:
@@ -133,6 +125,18 @@ _SERVICE_ADDED_COLUMNS = {
     "loki_selector": "TEXT",
 }
 
+# Per-turn observability columns (Phase 4 §12.K). Only the brain summary row
+# fills them — from ResultMessage.usage; tool rows stay null. Migrated on
+# startup like the thread columns above.
+_RUNS_ADDED_COLUMNS = {
+    "cache_read_input_tokens": "INTEGER",
+    "cache_creation_input_tokens": "INTEGER",
+    "input_tokens": "INTEGER",
+    "output_tokens": "INTEGER",
+    "cost_usd": "REAL",
+    "num_turns": "INTEGER",
+}
+
 
 def init_db() -> None:
     Path(settings.agentic_db).parent.mkdir(parents=True, exist_ok=True)
@@ -142,6 +146,10 @@ def init_db() -> None:
         for col, decl in _THREAD_ADDED_COLUMNS.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE threads ADD COLUMN {col} {decl}")
+        existing_runs = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+        for col, decl in _RUNS_ADDED_COLUMNS.items():
+            if col not in existing_runs:
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {decl}")
         existing_svc = {row["name"] for row in conn.execute("PRAGMA table_info(service_repos)")}
         for col, decl in _SERVICE_ADDED_COLUMNS.items():
             if col not in existing_svc:
@@ -215,13 +223,22 @@ def log_run(
     channel: str | None = None,
     user_id: str | None = None,
     error: str | None = None,
+    usage: dict | None = None,
+    cost_usd: float | None = None,
+    num_turns: int | None = None,
 ) -> int:
+    # Observability columns (§12.K) — only the brain summary row passes usage;
+    # tool rows leave them null. Token counts are derived from usage so callers
+    # forward ResultMessage.usage verbatim.
+    u = usage or {}
     with connect() as conn:
         cur = conn.execute(
             """
             INSERT INTO runs(created_at, thread_ts, channel, user_id, agent,
-                             input, output, status, duration_ms, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             input, output, status, duration_ms, error,
+                             cache_read_input_tokens, cache_creation_input_tokens,
+                             input_tokens, output_tokens, cost_usd, num_turns)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 time.time(),
@@ -234,6 +251,12 @@ def log_run(
                 status,
                 duration_ms,
                 error,
+                u.get("cache_read_input_tokens"),
+                u.get("cache_creation_input_tokens"),
+                u.get("input_tokens"),
+                u.get("output_tokens"),
+                cost_usd,
+                num_turns,
             ),
         )
         return cur.lastrowid
@@ -376,51 +399,6 @@ def list_services() -> list[dict]:
     with connect() as conn:
         rows = conn.execute("SELECT * FROM service_repos ORDER BY name").fetchall()
     return [dict(r) for r in rows]
-
-
-def save_pending_confirmation(thread_ts: str, action_type: str,
-                              payload: dict, question: str) -> None:
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO pending_confirmations(thread_ts, action_type, payload,
-                                              question, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(thread_ts) DO UPDATE SET
-                action_type=excluded.action_type,
-                payload=excluded.payload,
-                question=excluded.question,
-                created_at=excluded.created_at
-            """,
-            (thread_ts, action_type, json.dumps(payload), question, time.time()),
-        )
-
-
-PENDING_CONFIRMATION_TTL_S = 30 * 60  # 30 minutes
-
-
-def get_pending_confirmation(thread_ts: str) -> dict | None:
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM pending_confirmations WHERE thread_ts=?", (thread_ts,)
-        ).fetchone()
-    if not row:
-        return None
-    d = dict(row)
-    age = time.time() - float(d.get("created_at") or 0)
-    if age > PENDING_CONFIRMATION_TTL_S:
-        clear_pending_confirmation(thread_ts)
-        return None
-    try:
-        d["payload"] = json.loads(d["payload"])
-    except json.JSONDecodeError:
-        d["payload"] = {}
-    return d
-
-
-def clear_pending_confirmation(thread_ts: str) -> None:
-    with connect() as conn:
-        conn.execute("DELETE FROM pending_confirmations WHERE thread_ts=?", (thread_ts,))
 
 
 def recent_runs_for_thread(thread_ts: str, limit: int = 20) -> list[dict]:

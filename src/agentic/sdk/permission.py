@@ -32,9 +32,14 @@ from claude_agent_sdk import (
 
 log = logging.getLogger(__name__)
 
-# Tools that always require user confirm via Slack button.
-# Phase 1: empty. Phase 2 populates when MCP wrappers land.
-CONFIRM_TOOLS: set[str] = set()
+# Tools that always require user confirm via Slack button. These two have
+# user-visible side effects (approve/merge a PR) and are NOT in any
+# `allowed_tools` list, so the SDK actually routes them through this callback.
+# `github_approve_pr` has no server-side guard at all; `github_merge_pr` keeps
+# its mergeable_state guard but still must not merge without a human in the loop.
+# Stored as bare names — `_needs_confirm` strips the `mcp__<server>__` prefix
+# the control protocol uses so either form matches.
+CONFIRM_TOOLS: set[str] = {"github_merge_pr", "github_approve_pr"}
 
 # Bash commands whose `command` field, when prefix-matched, triggers confirm.
 # Phase 1: empty (push allowed inline). Phase 2 may revisit.
@@ -42,7 +47,9 @@ CONFIRM_BASH_PATTERNS: tuple[str, ...] = ()
 
 
 def _needs_confirm(tool_name: str, tool_input: dict[str, Any] | None) -> bool:
-    if tool_name in CONFIRM_TOOLS:
+    # MCP tools arrive as `mcp__agentic__github_merge_pr`; bare builtins as `Bash`.
+    bare = tool_name.rsplit("__", 1)[-1]
+    if tool_name in CONFIRM_TOOLS or bare in CONFIRM_TOOLS:
         return True
     if tool_name == "Bash":
         cmd = (tool_input or {}).get("command", "") or ""

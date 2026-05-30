@@ -7,10 +7,10 @@ until Phase 3 collapses dev into AgentDefinition.
 
 from __future__ import annotations
 
-import json
 import logging
+import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from claude_agent_sdk import (
@@ -18,31 +18,22 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,
-    ToolResultBlock,
     ToolUseBlock,
-    UserMessage,
 )
 
 from ..agents.base import load_prompt
-from ..brain import _format_messages
+from ..config import settings
 from ..store import get_thread, update_thread_fields
 from .client_pool import ThreadSessionManager
+from .hooks import build_brain_hooks
 from .mcp_tools import build_agentic_mcp_server
 from .permission import PendingPermissions, build_slack_permission_callback
+from .sub_agents import build_subagents
 
 log = logging.getLogger(__name__)
 
 # Slack chat.update is ~1/s/channel — 1.5s leaves headroom for long tails.
 _STREAM_EDIT_INTERVAL_S = 1.5
-
-
-@dataclass
-class ToolCallRecord:
-    name: str
-    input_preview: str
-    ok: bool
-    duration_ms: int
-    error: str | None = None
 
 
 @dataclass
@@ -53,16 +44,9 @@ class BrainResult:
     cost_usd: float
     duration_ms: int
     num_turns: int
-    tool_calls: list[ToolCallRecord] = field(default_factory=list)
+    tool_use_count: int = 0
     stop_reason: str | None = None
     error: str | None = None
-
-
-@dataclass
-class _PendingCall:
-    name: str
-    input_preview: str
-    started_at: float
 
 
 def make_brain_options_factory(
@@ -77,13 +61,18 @@ def make_brain_options_factory(
     `can_use_tool` actually fires for CONFIRM_TOOLS (§8 2026-05-29)."""
     server = mcp_server or build_agentic_mcp_server()
     system_prompt = load_prompt("brain_sdk")
+    # Built once at startup; prompt strings + tool lists are pinned into the
+    # session prefix so AgentDefinition changes don't churn the cache.
+    subagents = build_subagents()
 
     async def factory(thread_ts: str) -> ClaudeAgentOptions:
         row = get_thread(thread_ts) or {}
+        channel = (row.get("channel") or "").strip()
+        cwd, add_dirs = _session_dirs(row)
         cb = build_slack_permission_callback(
             pending=pending,
             slack_client=slack_client,
-            channel_id=(row.get("channel") or "").strip(),
+            channel_id=channel,
             thread_ts=thread_ts,
         )
         return ClaudeAgentOptions(
@@ -91,13 +80,38 @@ def make_brain_options_factory(
             mcp_servers={"agentic": server},
             permission_mode="default",
             can_use_tool=cb,
-            agents={},   # Phase 3 fill
-            hooks={},    # Phase 4 fill
+            agents=subagents,
+            hooks=build_brain_hooks(thread_ts=thread_ts, channel=channel),
             resume=row.get("sdk_session_id") or None,
             session_store=session_store,
+            cwd=cwd,
+            add_dirs=add_dirs,
         )
 
     return factory
+
+
+def _session_dirs(row: dict) -> tuple[str | None, list[str]]:
+    """Resolve the session cwd + writable roots for the dev sub-agent.
+
+    The session cwd is locked at session-open (ThreadSessionManager caches the
+    client per thread), so a worktree created mid-thread can't change it. We
+    therefore (a) open in the thread's active worktree when one already exists,
+    else the shared workspace dir, and (b) add both the workspace and worktree
+    roots to ``add_dirs`` so dev edits land under acceptEdits even when the
+    worktree was created after the session opened — the per-turn worktree path
+    still rides in on the workspace hint (§8 2026-05-29)."""
+    roots = [d for d in (settings.workspace_dir, settings.worktree_dir) if d]
+    worktree = (row.get("active_worktree") or "").strip()
+    if worktree and os.path.isdir(worktree):
+        cwd: str | None = worktree
+        if worktree not in roots:
+            roots.append(worktree)
+    else:
+        cwd = settings.workspace_dir or None
+    # Preserve order, drop dups.
+    add_dirs = list(dict.fromkeys(roots))
+    return cwd, add_dirs
 
 
 async def run_brain_session(
@@ -126,11 +140,13 @@ async def run_brain_session(
 
     text_parts: list[str] = []
     last_edit = 0.0
-    pending_calls: dict[str, _PendingCall] = {}
-    tool_calls: list[ToolCallRecord] = []
+    tool_use_count = 0
     result_msg: ResultMessage | None = None
     error: str | None = None
 
+    # Per-tool runs logging now lives in the PostToolUse/PostToolUseFailure hooks
+    # (§12.J); the stream loop only buffers text for Slack and counts tool uses
+    # for the footer.
     try:
         async for msg in client.receive_response():
             if isinstance(msg, AssistantMessage):
@@ -138,25 +154,16 @@ async def run_brain_session(
                     if isinstance(block, TextBlock) and block.text:
                         text_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
-                        pending_calls[block.id] = _PendingCall(
-                            name=block.name,
-                            input_preview=_preview(block.input),
-                            started_at=time.monotonic(),
-                        )
+                        tool_use_count += 1
                 now = time.monotonic()
                 if text_parts and now - last_edit >= _STREAM_EDIT_INTERVAL_S:
-                    await _safe_placeholder_update(
+                    cooldown = await _safe_placeholder_update(
                         slack_client, channel_id, placeholder_ts,
                         "".join(text_parts),
                     )
-                    last_edit = now
-            elif isinstance(msg, UserMessage):
-                content = msg.content if isinstance(msg.content, list) else []
-                for block in content:
-                    if isinstance(block, ToolResultBlock):
-                        call = pending_calls.pop(block.tool_use_id, None)
-                        if call is not None:
-                            tool_calls.append(_close_call(call, block))
+                    # On a Slack 429 push the next allowed edit out by Retry-After
+                    # so the stream stops hammering chat.update.
+                    last_edit = now + cooldown
             elif isinstance(msg, ResultMessage):
                 result_msg = msg
                 break
@@ -191,31 +198,33 @@ async def run_brain_session(
         reply=final_text, session_id=session_id, usage=usage,
         cost_usd=cost or 0.0, duration_ms=duration_ms,
         num_turns=(result_msg.num_turns or 0) if result_msg else 0,
-        tool_calls=tool_calls,
+        tool_use_count=tool_use_count,
         stop_reason=result_msg.stop_reason if result_msg else None,
         error=error,
     )
 
 
-def _preview(payload: Any) -> str:
-    try:
-        return json.dumps(payload, ensure_ascii=False)[:500]
-    except Exception:
-        return str(payload)[:500]
-
-
-def _close_call(call: _PendingCall, block: ToolResultBlock) -> ToolCallRecord:
-    err: str | None = None
-    if block.is_error:
-        c = block.content
-        err = c[:500] if isinstance(c, str) else _preview(c) if c else "tool_error"
-    return ToolCallRecord(
-        name=call.name,
-        input_preview=call.input_preview,
-        ok=not bool(block.is_error),
-        duration_ms=int((time.monotonic() - call.started_at) * 1000),
-        error=err,
-    )
+def _format_messages(messages: list[dict]) -> str:
+    """Render Slack thread history into a budget-capped transcript for the brain
+    user message (inlined from the retired brain.py at Phase 5 cutover)."""
+    if not messages:
+        return ""
+    lines: list[str] = []
+    budget = settings.brain_history_budget_chars
+    msg_cap = settings.brain_history_msg_cap_chars
+    for m in messages:
+        role = m.get("role", "?")
+        text = (m.get("text") or "").strip()
+        line = f"{role}: {text}"
+        if len(line) > msg_cap:
+            line = line[:msg_cap] + f"\n…[message cắt bớt {len(line) - msg_cap} ký tự]"
+        if sum(len(existing) for existing in lines) + len(line) > budget:
+            remaining = max(0, budget - sum(len(existing) for existing in lines))
+            if remaining > 200:
+                lines.append(line[:remaining] + "\n…[history cắt bớt]")
+            break
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _compose_user_message(
@@ -234,15 +243,41 @@ def _compose_user_message(
     return "\n\n".join(parts)
 
 
-async def _safe_placeholder_update(client: Any, channel: str, ts: str, text: str) -> None:
+async def _safe_placeholder_update(
+    client: Any, channel: str, ts: str, text: str
+) -> float:
+    """Best-effort streaming edit. Returns extra seconds to wait before the next
+    edit — non-zero only when Slack rate-limited us (chat.update is ~1/s/channel,
+    so a burst can 429). The final, complete reply is rendered by the worker onto
+    the same placeholder, so dropping an intermediate edit here is safe."""
     if not (channel and ts):
-        return
+        return 0.0
     snippet = text.strip()
     if not snippet:
-        return
+        return 0.0
     if len(snippet) > 3500:
         snippet = snippet[:3400] + "\n…"
     try:
         await client.chat_update(channel=channel, ts=ts, text=snippet)
-    except Exception:
+        return 0.0
+    except Exception as e:
+        retry_after = _retry_after_seconds(e)
+        if retry_after:
+            log.warning("chat.update rate-limited; backing off %.1fs", retry_after)
+            return retry_after
         log.exception("brain stream placeholder update failed")
+        return 0.0
+
+
+def _retry_after_seconds(exc: Exception) -> float:
+    """Extract Retry-After (seconds) from a Slack ratelimited error, else 0.
+    Duck-typed so we don't hard-depend on slack_sdk's error class here."""
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return 0.0
+    headers = getattr(resp, "headers", None) or {}
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    try:
+        return float(raw) if raw is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0

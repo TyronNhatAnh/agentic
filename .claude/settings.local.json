@@ -105,7 +105,12 @@
       "WebSearch",
       "Read(//private/tmp/casdk/**)",
       "Bash(unzip -q claude_agent_sdk-0.2.87-py3-none-macosx_11_0_arm64.whl -d unpacked)",
-      "Bash(.venv/bin/pip install *)"
+      "Bash(.venv/bin/pip install *)",
+      "Bash(AGENTIC_DB=/tmp/_stats_test.db .venv/bin/python -c ' *)",
+      "Bash(rm -f /tmp/_stats_test.db*)",
+      "Bash(git rm *)",
+      "Bash(AGENTIC_DB=/tmp/_p5.db .venv/bin/python -c \"from agentic import store; store.settings.agentic_db='/tmp/_p5.db'; store._PRAGMAS_APPLIED=False; store.init_db\\(\\); print\\('init ok, pending_confirmations gone:', 'pending_confirmations' not in store.SCHEMA\\)\")",
+      "Bash(rm -f /tmp/_p5.db*)"
     ],
     "deny": [
       "Read(//Users/tyron/Projects/agentic/.env)",

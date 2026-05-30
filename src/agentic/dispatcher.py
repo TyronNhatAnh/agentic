@@ -1,25 +1,24 @@
-import asyncio
+"""Request orchestrator — SDK-only (Phase 5 cutover).
+
+`handle_message` is now thin: resolve any prepared worktree for the ticket in
+play (so the brain can route fix/PR work to the dev sub-agent), then delegate
+the whole turn to a long-lived `ClaudeSDKClient` via `run_brain_session`. The
+brain orchestrates tools + sub-agents natively; Python only does Slack I/O,
+workspace lookup, and persistence. The legacy `claude -p` ReAct loop, the
+`AGENTIC_USE_SDK` flag, and the JSON-action path are gone.
+"""
+
 import json
 import logging
 import re
 import time
-from pathlib import Path
 
-from .agents import REGISTRY
-from .agents.dev import run_dev as _run_dev_direct
-from .agents.base import run_claude, _usage_tracker
-from .brain import Action, BrainDecision, decide
-from .brain import _format_messages as _format_thread_messages
 from .config import settings
 from .integrations import git as git_int
-from .integrations import github, grafana, jira
-from .integrations import ship as ship_int
-from .integrations.result import ToolResult
 from .sdk import (
     PendingPermissions,
     ThreadSessionManager,
     run_brain_session,
-    run_dev_sdk,
 )
 from .store import (
     add_message,
@@ -32,28 +31,23 @@ from .store import (
     update_thread_fields,
 )
 
+log = logging.getLogger(__name__)
 
-# SDK singletons (Phase 1+). main.py calls `init_sdk_singletons(...)` after
-# init_db; tests and the legacy code path can leave them unset (None).
-_pool: ThreadSessionManager | None = None
+
+# SDK singletons. main.py calls `init_sdk_singletons(...)` after init_db; tests
+# inject their own via monkeypatch and may leave these unset (None).
 _brain_pool: ThreadSessionManager | None = None
 _pending: PendingPermissions | None = None
 
 
 def init_sdk_singletons(
     *,
-    pool: ThreadSessionManager,
+    brain_pool: ThreadSessionManager,
     pending: PendingPermissions,
-    brain_pool: ThreadSessionManager | None = None,
 ) -> None:
-    global _pool, _pending, _brain_pool
-    _pool = pool
+    global _pending, _brain_pool
     _pending = pending
     _brain_pool = brain_pool
-
-
-def _pool_singleton() -> ThreadSessionManager | None:
-    return _pool
 
 
 def _brain_pool_singleton() -> ThreadSessionManager | None:
@@ -64,62 +58,40 @@ def _pending_singleton() -> PendingPermissions | None:
     return _pending
 
 
-from .summarizer import maybe_schedule as maybe_schedule_summary
-from .worker import ReplyFn
-
-log = logging.getLogger(__name__)
-
-
-class DispatchResult:
-    def __init__(self) -> None:
-        self.blocks: list[str] = []
-        self.errors: list[str] = []
-
-    def add(self, text: str) -> None:
-        if text:
-            self.blocks.append(text)
-
-    def render(self) -> str:
-        body = "\n\n---\n\n".join(self.blocks) if self.blocks else "(no output)"
-        if self.errors:
-            body += "\n\n⚠️ " + "; ".join(self.errors)
-        return body
-
-
-_MAX_RETRIES = 2
-_RETRY_BACKOFF_S = (0.5, 1.5)
-
-
-async def _progress(fn: ReplyFn | None, msg: str) -> None:
-    if fn:
-        try:
-            await fn(msg)
-        except Exception:
-            log.debug("progress update failed: %s", msg)
-
-
-def _footer(tool_count: int, elapsed_s: float) -> str:
+def _footer(
+    tool_count: int,
+    elapsed_s: float,
+    *,
+    usage: dict | None = None,
+    cost_usd: float | None = None,
+) -> str:
     plural = "s" if tool_count != 1 else ""
     base = f"_🛠️ {tool_count} tool{plural} · {elapsed_s:.1f}s"
-    tracker = _usage_tracker.get(None)
-    if tracker:
-        in_tok = sum(u.get("total_input_tokens", 0) for u in tracker)
-        out_tok = sum(u.get("total_output_tokens", 0) for u in tracker)
-        cost = sum(u.get("cost_usd") or 0.0 for u in tracker)
+    if usage:
+        in_tok = (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+        )
+        out_tok = usage.get("output_tokens", 0)
         base += f" · {in_tok // 1000}k/{out_tok // 1000}k tok"
-        if cost > 0:
-            base += f" · ${cost:.3f}"
+    if cost_usd:
+        base += f" · ${cost_usd:.3f}"
     return base + "_"
 
 
-def _with_footer(reply: str, tool_count: int, t_start: float) -> str:
+def _with_footer(
+    reply: str,
+    tool_count: int,
+    t_start: float,
+    *,
+    usage: dict | None = None,
+    cost_usd: float | None = None,
+) -> str:
     if tool_count <= 0:
         return reply
-    return f"{reply}\n\n{_footer(tool_count, time.time() - t_start)}"
-
-
-_GITHUB_PR_RE = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
-_REPO_SLUG_RE = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b")
+    footer = _footer(tool_count, time.time() - t_start, usage=usage, cost_usd=cost_usd)
+    return f"{reply}\n\n{footer}"
 
 
 def _truncate(text: str, limit: int, *, label: str = "input") -> tuple[str, bool]:
@@ -133,351 +105,6 @@ def _truncate(text: str, limit: int, *, label: str = "input") -> tuple[str, bool
         + text[-tail:]
     )
     return truncated, True
-
-
-def _repo_from_text_or_history(text: str, messages: list[dict]) -> str | None:
-    haystacks = [text] + [m.get("text") or "" for m in reversed(messages)]
-    return _repo_from_haystacks(haystacks) or settings.github_default_repo
-
-
-def _repo_from_haystacks(haystacks: list[str]) -> str | None:
-    for item in haystacks:
-        match = _GITHUB_PR_RE.search(item)
-        if match:
-            return match.group(1)
-    for item in haystacks:
-        match = _REPO_SLUG_RE.search(item)
-        if match:
-            return match.group(1)
-    return None
-
-
-def _repo_from_text_only(text: str) -> str | None:
-    return _repo_from_haystacks([text])
-
-# Reply gửi lên Slack nên rất ngắn: chỉ kết luận + link/keys + next step.
-_REPLY_SAFE_LEN = 2500
-_REPLY_SUMMARY_TIMEOUT = 45
-_REPLY_SUMMARY_PROMPT = (
-    "Bạn là trợ lý rút gọn phản hồi Slack bằng tiếng Việt.\n"
-    "Viết LẠI phản hồi gốc thành tin nhắn Slack ngắn gọn, tối đa 2500 ký tự.\n"
-    "Chỉ giữ: kết luận chính, Jira keys / PR links / URL quan trọng,\n"
-    "và 1 dòng next step nếu có. Bỏ hết phần giải thích dài, code block lớn,\n"
-    "log, diff. Văn bản thuần, không tiêu đề, không markdown fence."
-)
-_DEV_REPLY_SAFE_LEN = 1200
-_DEV_REPLY_SUMMARY_PROMPT = (
-    "Bạn là trợ lý rút gọn kết quả dev/fix cho Slack bằng tiếng Việt.\n"
-    "Viết tối đa 6 dòng, dễ đọc. Giữ đúng dữ kiện, không thêm thông tin.\n"
-    "Ưu tiên format:\n"
-    "Status: <đã sửa / bị chặn>\n"
-    "Changed: <file/ý chính nếu có>\n"
-    "Verified: <lệnh test/build đã chạy hoặc chưa chạy>\n"
-    "Next: <cần user làm gì nếu có>\n"
-    "Bỏ bảng dài, phân tích dài, code block lớn."
-)
-
-
-async def _shrink_reply(text: str) -> str:
-    if len(text) <= _REPLY_SAFE_LEN:
-        return text
-    try:
-        summary = await run_claude(
-            _REPLY_SUMMARY_PROMPT, text, timeout=_REPLY_SUMMARY_TIMEOUT,
-            model=settings.agent_model,
-        )
-        summary = summary.strip()
-    except Exception:
-        log.exception("reply summarization failed; falling back to truncation")
-        return text[: _REPLY_SAFE_LEN - 20] + "\n…(rút gọn)"
-    if len(summary) > _REPLY_SAFE_LEN:
-        summary = summary[: _REPLY_SAFE_LEN - 20] + "\n…(rút gọn)"
-    return summary
-
-
-async def _shrink_dev_reply(text: str) -> str:
-    if len(text) <= _DEV_REPLY_SAFE_LEN and "|" not in text:
-        return text
-    try:
-        summary = await run_claude(
-            _DEV_REPLY_SUMMARY_PROMPT, text, timeout=_REPLY_SUMMARY_TIMEOUT,
-            model=settings.agent_model,
-        )
-        return summary.strip()
-    except Exception:
-        log.exception("dev reply summarization failed; falling back to truncation")
-        return text[: _DEV_REPLY_SAFE_LEN - 20] + "\n…(rút gọn)"
-
-
-def _is_review_pr_request(text: str, action: Action) -> bool:
-    if action.type != "github.get_pr_diff":
-        return False
-    lowered = text.lower()
-    return "review" in lowered or "check pr" in lowered or "code review" in lowered
-
-
-def _is_fix_pr_request(text: str, action: Action) -> bool:
-    if action.type != "github.get_pr_diff":
-        return False
-    lowered = text.lower()
-    return any(
-        word in lowered
-        for word in (
-            "fix",
-            "sửa",
-            "sua",
-            "apply patch",
-            "patch",
-            "implement",
-        )
-    )
-
-
-def _is_read_action(action_type: str) -> bool:
-    write_prefixes = (
-        "github.create_",
-        "github.comment_",
-        "github.approve_",
-        "github.merge_",
-        "jira.create_",
-        "jira.comment_",
-        "jira.transition_",
-        "git.",
-        "ship.",
-    )
-    return not action_type.startswith(write_prefixes)
-
-
-def _has_log_output(tool_outputs: list[tuple[str, str]]) -> bool:
-    """True if any tool output is Loki log lines — those need grounding rules."""
-    return any(at == "grafana.search_logs" for at, _ in tool_outputs)
-
-
-async def _synthesize_action_reply(
-    *,
-    user_text: str,
-    tool_outputs: list[tuple[str, str]],
-    summary: str | None,
-) -> str:
-    system = (
-        "Bạn là trợ lý Slack của Tyron. Trả lời tiếng Việt tự nhiên, ngắn gọn.\n"
-        "Dựa vào tool outputs bên dưới để trả lời đúng câu user hỏi. "
-        "Không bịa ngoài dữ liệu tool. Nếu dữ liệu là docs/specs/ticket detail, "
-        "hãy tóm tắt phần liên quan thay vì dump raw toàn bộ. "
-        "Giữ link/key quan trọng."
-    )
-    if _has_log_output(tool_outputs):
-        # Log lines invite the model to fill in fields it never saw (user_id, hash,
-        # device, ip) because an "incident report" format implies they exist. Force
-        # field-level grounding so a truncated/absent value becomes UNKNOWN, not a guess.
-        system += (
-            "\n\nDữ liệu tool gồm log. Quy tắc BẮT BUỘC khi đọc log:\n"
-            "- Chỉ nêu giá trị (id, order_id, user_id, ip, device, hash, status code...) "
-            "nếu nó XUẤT HIỆN NGUYÊN VĂN trong dòng log. Tuyệt đối không suy diễn/điền cho đủ format.\n"
-            "- Field không thấy trong log → ghi rõ `không có trong log` hoặc bỏ qua, KHÔNG đoán.\n"
-            "- Dòng có `…[truncated]` là đã bị cắt — đừng bịa phần sau dấu cắt.\n"
-            "- Tách rõ phần *quan sát từ log* (fact) và *giả thuyết* (suy luận của bạn)."
-        )
-    blocks = []
-    if summary:
-        blocks.append(f"## Thread summary\n{summary.strip()}")
-    blocks.append(f"## User asked\n{user_text}")
-    rendered_tools = "\n\n".join(
-        f"### {action_type}\n{output}" for action_type, output in tool_outputs
-    )
-    blocks.append(f"## Tool outputs\n{rendered_tools}")
-    return await run_claude(system, "\n\n".join(blocks), model=settings.agent_model)
-
-
-async def _prepare_pr_workspace_context(repo: str, pr: str) -> tuple[str | None, str]:
-    if repo == "unknown repo" or pr == "unknown PR":
-        return None, ""
-    try:
-        workspace = await git_int.prepare_pr_review_workspace(repo, int(pr))
-    except Exception as e:
-        log.exception("prepare PR workspace failed")
-        return None, f"Local workspace unavailable: {e}"
-    if workspace.ok and isinstance(workspace.data, dict):
-        cwd = workspace.data.get("repo_path")
-        return cwd, (
-            f"{workspace.data.get('message')}\n"
-            f"Local repo cwd: `{cwd}`."
-        )
-    return None, (
-        f"Local workspace unavailable: "
-        f"{workspace.error_code or 'UNKNOWN'} - {workspace.user_message or ''}"
-    )
-
-
-async def _run_review_after_pr_diff(
-    *,
-    action: Action,
-    diff: str,
-    thread_ts: str | None,
-    channel: str | None,
-    user_id: str | None,
-) -> tuple[str | None, str, str | None]:
-    runner = REGISTRY.get("review")
-    if not runner:
-        return None, "error", "unknown agent `review`"
-
-    repo = action.payload.get("repo") or settings.github_default_repo or "unknown repo"
-    pr = action.payload.get("pr") or "unknown PR"
-    cwd, local_context = await _prepare_pr_workspace_context(repo, str(pr))
-
-    task = (
-        f"Review PR #{pr} `{repo}` từ diff đã fetch. Trả findings theo template review. "
-        "Nếu local workspace khả dụng, verify các nghi vấn bằng file thật trước khi kết luận."
-    )
-    context = diff if not local_context else f"{local_context}\n\n---\n{diff}"
-    t0 = time.time()
-    output: str | None = None
-    status = "error"
-    err: str | None = None
-    try:
-        output = await runner(task, context=context, cwd=cwd)
-        status = "ok"
-    except Exception as e:
-        log.exception("agent review failed after fetching PR diff")
-        err = str(e)
-    log_run(
-        agent="review",
-        input_text=task,
-        output=output,
-        status=status,
-        duration_ms=int((time.time() - t0) * 1000),
-        thread_ts=thread_ts,
-        channel=channel,
-        user_id=user_id,
-        error=err,
-    )
-    return output, status, err
-
-
-async def _run_fix_after_pr_diff(
-    *,
-    action: Action,
-    diff: str,
-    user_text: str,
-    thread_ts: str | None,
-    channel: str | None,
-    user_id: str | None,
-) -> tuple[str | None, str, str | None]:
-    runner = REGISTRY.get("dev")
-    if not runner:
-        return None, "error", "unknown agent `dev`"
-
-    repo = action.payload.get("repo") or settings.github_default_repo or "unknown repo"
-    pr = action.payload.get("pr") or "unknown PR"
-    cwd, local_context = await _prepare_pr_workspace_context(repo, str(pr))
-    if not cwd:
-        return None, "error", local_context or "local workspace unavailable"
-
-    task = (
-        f"Fix request của user trong PR #{pr} `{repo}`. "
-        f"User nói: {user_text}\n\n"
-        "Bạn đang chạy trong local PR worktree. Sửa file trực tiếp trong workspace, "
-        "rồi trả lời ngắn gọn: đã sửa gì, test/build đã chạy, còn gì cần user tự verify."
-    )
-    context = f"{local_context}\n\n---\n{diff}"
-    t0 = time.time()
-    output: str | None = None
-    status = "error"
-    err: str | None = None
-    try:
-        output = await runner(task, context=context, cwd=cwd, apply_changes=True)
-        if output:
-            output = await _shrink_dev_reply(output)
-        status = "ok"
-    except Exception as e:
-        log.exception("agent dev failed after preparing PR workspace")
-        err = str(e)
-    log_run(
-        agent="dev",
-        input_text=task,
-        output=output,
-        status=status,
-        duration_ms=int((time.time() - t0) * 1000),
-        thread_ts=thread_ts,
-        channel=channel,
-        user_id=user_id,
-        error=err,
-    )
-    return output, status, err
-
-
-async def _invoke_integration(action: Action) -> ToolResult:
-    if action.type.startswith("github."):
-        return await github.execute_action(action.type, action.payload)
-    if action.type.startswith("jira."):
-        return await jira.execute_action(action.type, action.payload)
-    if action.type.startswith("grafana."):
-        return await grafana.execute_action(action.type, action.payload)
-    if action.type.startswith("git."):
-        return await git_int.execute_action(action.type, action.payload)
-    if action.type.startswith("ship."):
-        return await ship_int.execute_action(action.type, action.payload)
-    return ToolResult.failure("UNKNOWN_ACTION", f"unknown action `{action.type}`")
-
-
-async def _run_action(action: Action) -> ToolResult:
-    """Run an action with deterministic retry. Returns the final ToolResult.
-
-    Write actions (create/comment/transition/git.*) are NEVER retried even on
-    retryable errors — a timed-out POST may have succeeded server-side, and
-    retrying would duplicate the Jira ticket / PR comment / branch.
-    """
-    can_retry = _is_read_action(action.type)
-    last: ToolResult | None = None
-    for attempt in range(_MAX_RETRIES + 1):
-        result = await _invoke_integration(action)
-        last = result
-        if result.ok:
-            return result
-        if result.error_code == "NEEDS_CONFIRMATION":
-            return result
-        log.warning(
-            "action %s failed (attempt %d): %s — %s",
-            action.type, attempt + 1, result.error_code, result.user_message,
-        )
-        if not can_retry or not result.retryable or attempt >= _MAX_RETRIES:
-            break
-        await asyncio.sleep(_RETRY_BACKOFF_S[min(attempt, len(_RETRY_BACKOFF_S) - 1)])
-    assert last is not None
-    return last
-
-
-_USER_FRIENDLY_ERROR_MESSAGES = {
-    "UNKNOWN_ACTION": (
-        "Mình chưa hỗ trợ thao tác này, hoặc bot đang chạy 2 instance lệch version. "
-        "Ông thử restart bot (`make stop && make start`) rồi báo lại nha."
-    ),
-    "UNKNOWN": "Có lỗi không xác định khi gọi tool. Ông thử lại sau xíu nha.",
-    "SERVER": "Service phía bên kia đang lỗi (5xx). Thử lại sau xíu.",
-    "NETWORK": "Không kết nối được service. Có thể mạng đang lag.",
-    "TIMEOUT": "Tool chạy quá lâu, đã timeout. Thử lại nha.",
-    "RATE_LIMIT": "Bị rate-limit, đợi tí rồi thử lại.",
-}
-
-
-def _format_action_result(result: ToolResult) -> tuple[str, str, str | None]:
-    if result.ok:
-        return result.display(), "ok", None
-    if result.error_code == "NEEDS_CONFIRMATION":
-        return f"❓ {result.user_message}", "pending", "NEEDS_CONFIRMATION"
-    soft_codes = {"AUTH", "CONFIG", "VALIDATION", "NOT_FOUND"}
-    icon = "⚠️" if result.error_code in soft_codes else "❌"
-    # Internal/transport codes have unhelpful raw messages — substitute a friendly
-    # explanation and log the raw detail for debugging. AUTH/CONFIG/VALIDATION/
-    # NOT_FOUND messages from tool authors are already user-facing.
-    if result.error_code in _USER_FRIENDLY_ERROR_MESSAGES:
-        friendly = _USER_FRIENDLY_ERROR_MESSAGES[result.error_code]
-        log.warning(
-            "tool error rendered as friendly message: code=%s raw=%r",
-            result.error_code, result.user_message,
-        )
-        return f"{icon} {friendly}", "error", result.error_code
-    return f"{icon} {result.user_message}", "error", result.error_code
 
 
 def _service_slug_from_registry_text(text: str) -> str | None:
@@ -516,49 +143,6 @@ def _service_slug_from_registry(text: str, messages: list[dict]) -> str | None:
         if found:
             return found
     return None
-
-
-def _dev_cwd_from_context(
-    thread_row: dict | None,
-    text: str = "",
-    prior_messages: list[dict] | None = None,
-) -> tuple[str | None, str | None]:
-    """Resolve (repo_slug, local_path) for the dev agent.
-
-    Tries, in order:
-      1. Explicit repo/PR slug in the current message — wins over everything so a
-         concrete request never gets routed to a stale thread repo.
-      2. thread.repo field (already persisted), only if no explicit slug.
-      3. Bare service name/alias scanned from the registry, then repo/PR parsed
-         from message history (or the default repo) — only when (1) found nothing.
-    Returns (None, None) if no local mapping found.
-    """
-    candidates: list[str] = []
-    explicit = _repo_from_text_only(text)
-    if explicit:
-        candidates.append(explicit)
-    elif thread_row:
-        slug = (thread_row.get("repo") or "").strip()
-        if slug:
-            candidates.append(slug)
-    if not explicit:
-        # Bare service name/alias (no owner prefix, e.g. "ggx-kr-da-api") — the
-        # slug regex needs a "/", so scan the registry only after ruling out an
-        # explicit repo in the current message. Never fall back to an old thread
-        # repo when the user just gave a concrete repo/PR.
-        scanned = _service_slug_from_registry(text, prior_messages or [])
-        if scanned and scanned not in candidates:
-            candidates.append(scanned)
-        inferred = _repo_from_text_or_history(text, prior_messages or [])
-        if inferred and inferred not in candidates:
-            candidates.append(inferred)
-    for slug in candidates:
-        svc = resolve_service_by_github_repo(slug)
-        if svc:
-            path = svc.get("repo_path") or ""
-            if path and Path(path).is_dir():
-                return slug, path
-    return None, None
 
 
 _TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
@@ -615,40 +199,12 @@ def _workspace_brain_hint(ws: dict) -> str:
     return (
         "## Workspace đang mở\n"
         f"Thread này đã có worktree sẵn cho ticket `{ws['ticket']}` "
-        f"(service `{ws['service']}`, branch `{ws['feature_branch']}`). "
-        "Nếu user muốn fix/sửa/commit/push/tạo PR cho ticket này → trả 1 `dev` step "
-        "(dev sẽ tự edit, commit, push, mở PR rồi báo link)."
+        f"(service `{ws['service']}`, branch `{ws['feature_branch']}`).\n"
+        f"- Worktree path (cwd để đọc/sửa/commit): `{ws['worktree']}`\n"
+        "Nếu user muốn fix/sửa/commit/push/tạo PR cho ticket này → giao cho `dev`. "
+        "Nhớ chuyển nguyên worktree path trên cho dev để nó edit đúng chỗ "
+        "(dev tự edit, commit, push, mở PR rồi báo link)."
     )
-
-
-def _workspace_context_block(ws: dict) -> str:
-    """Facts injected into the dev agent run (procedure lives in prompts/dev.md)."""
-    lines = [
-        "## Workspace (bạn đang đứng ở đây)",
-        f"- Worktree (cwd của bạn): `{ws['worktree']}`",
-        f"- Branch: `{ws['feature_branch']}`",
-    ]
-    if ws.get("github_repo"):
-        lines.append(f"- Repo GitHub: `{ws['github_repo']}`")
-    if ws.get("base"):
-        lines.append(f"- Base branch để mở PR: `{ws['base']}`")
-    lines.append(f"- Ticket: `{ws['ticket']}`")
-    return "\n".join(lines)
-
-
-def _dev_context_for_step(prior_output: str, prior_messages: list[dict]) -> str:
-    if prior_output:
-        context, _ = _truncate(
-            prior_output, settings.max_context_chars, label="context"
-        )
-        return context
-    thread_context = _format_thread_messages(prior_messages)
-    if not thread_context:
-        return ""
-    context, _ = _truncate(
-        thread_context, settings.dev_context_chars, label="dev context"
-    )
-    return context
 
 
 async def handle_message(
@@ -658,29 +214,23 @@ async def handle_message(
     channel: str | None,
     user_id: str | None,
     thread_history: list[dict] | None = None,
-    progress: ReplyFn | None = None,
     slack_client=None,
     placeholder_ts: str | None = None,
 ) -> str:
     t_start = time.time()
-    tool_count = 0
-    _call_usage: list[dict] = []
-    _usage_tracker.set(_call_usage)
     text, input_truncated = _truncate(text, settings.max_input_chars, label="input")
-    summary: str | None = None
+
     prior_messages: list[dict] = []
     thread_row: dict | None = None
     if thread_ts:
         touch_thread(thread_ts, channel)
         thread_row = get_thread(thread_ts)
-        summary = (thread_row or {}).get("summary")
         # Slack thread history (when available) covers non-mention user messages
-        # that the DB never sees; fall back to DB if Slack fetch returned nothing.
+        # the DB never sees; fall back to DB if Slack fetch returned nothing.
         prior_messages = thread_history or recent_messages(thread_ts, limit=10)
-    last_agent: str | None = None
 
-    # Resolve any worktree already prepared for the ticket in play. Used both to
-    # nudge the brain (route fix/PR to dev) and to run dev inside that worktree.
+    # Resolve any worktree already prepared for the ticket in play so the brain
+    # can route fix/PR work to the dev sub-agent inside it.
     workspace = await _resolve_active_workspace(thread_row, text, prior_messages)
     if workspace and thread_ts:
         fields = {
@@ -691,367 +241,64 @@ async def handle_message(
             fields["repo"] = workspace["github_repo"]
         update_thread_fields(thread_ts, **fields)
 
-    if settings.use_sdk:
-        if slack_client is None or not placeholder_ts:
-            raise RuntimeError(
-                "AGENTIC_USE_SDK=true requires slack_client + placeholder_ts "
-                "from Job (worker must forward them)"
-            )
-        brain_pool = _brain_pool_singleton()
-        pending_perms = _pending_singleton()
-        if brain_pool is None or pending_perms is None:
-            raise RuntimeError(
-                "AGENTIC_USE_SDK=true but SDK brain singletons not initialized "
-                "(main.py must call init_sdk_singletons with brain_pool)"
-            )
-        brain_result = await run_brain_session(
-            user_text=text,
-            thread_ts=thread_ts or "",
-            channel_id=channel or "",
-            slack_client=slack_client,
-            placeholder_ts=placeholder_ts,
-            thread_history=thread_history or [],
-            workspace_hint=_workspace_brain_hint(workspace) if workspace else None,
-            pool=brain_pool,
-            pending=pending_perms,
+    if slack_client is None or not placeholder_ts:
+        raise RuntimeError(
+            "SDK brain path requires slack_client + placeholder_ts from the Job "
+            "(worker must forward them)"
         )
-        log_run(
-            agent="brain",
-            input_text=text,
-            output=brain_result.reply,
-            status="error" if brain_result.error else "ok",
-            duration_ms=brain_result.duration_ms,
-            thread_ts=thread_ts,
-            channel=channel,
-            user_id=user_id,
-            error=brain_result.error,
+    brain_pool = _brain_pool_singleton()
+    pending_perms = _pending_singleton()
+    if brain_pool is None or pending_perms is None:
+        raise RuntimeError(
+            "SDK brain singletons not initialized "
+            "(main.py must call init_sdk_singletons)"
         )
-        for tc in brain_result.tool_calls:
-            log_run(
-                agent=tc.name,
-                input_text=tc.input_preview,
-                output=None,
-                status="ok" if tc.ok else "error",
-                duration_ms=tc.duration_ms,
-                thread_ts=thread_ts,
-                channel=channel,
-                user_id=user_id,
-                error=tc.error,
-            )
-        reply_text = brain_result.reply or "(no output)"
-        if brain_result.error:
-            reply_text = f"{reply_text}\n\n⚠️ {brain_result.error}".strip()
-        return _with_footer(reply_text, len(brain_result.tool_calls) + 1, t_start)
 
-    await _progress(progress, "🧠 Brain đang phân tích...")
-    started = time.time()
-    try:
-        decision: BrainDecision = await decide(
-            text, summary=summary, messages=prior_messages,
-            workspace_hint=_workspace_brain_hint(workspace) if workspace else None,
-        )
-        tool_count += 1
-    except Exception as e:
-        tool_count += 1
-        log_run(
-            agent="brain",
-            input_text=text,
-            output=None,
-            status="error",
-            duration_ms=int((time.time() - started) * 1000),
-            thread_ts=thread_ts,
-            channel=channel,
-            user_id=user_id,
-            error=str(e),
-        )
-        return _with_footer(f"❌ Brain failed: {e}", tool_count, t_start)
+    brain_result = await run_brain_session(
+        user_text=text,
+        thread_ts=thread_ts or "",
+        channel_id=channel or "",
+        slack_client=slack_client,
+        placeholder_ts=placeholder_ts,
+        thread_history=thread_history or [],
+        workspace_hint=_workspace_brain_hint(workspace) if workspace else None,
+        pool=brain_pool,
+        pending=pending_perms,
+    )
 
+    # Per-tool runs rows are written by the PostToolUse/PostToolUseFailure hooks
+    # (§12.J). Here we log only the brain summary row, carrying the session
+    # usage/cost for the observability columns (§12.K).
     log_run(
         agent="brain",
         input_text=text,
-        output=decision.raw,
-        status="ok",
-        duration_ms=int((time.time() - started) * 1000),
+        output=brain_result.reply,
+        status="error" if brain_result.error else "ok",
+        duration_ms=brain_result.duration_ms,
         thread_ts=thread_ts,
         channel=channel,
         user_id=user_id,
+        error=brain_result.error,
+        usage=brain_result.usage,
+        cost_usd=brain_result.cost_usd,
+        num_turns=brain_result.num_turns,
     )
 
-    if decision.need_clarification and decision.clarify_question:
-        return _with_footer(
-            f"❓ {decision.clarify_question}", tool_count, t_start
-        )
-
-    result = DispatchResult()
+    reply_text = brain_result.reply or "(no output)"
     if input_truncated:
-        result.errors.append(
-            f"input quá dài, đã cắt còn {settings.max_input_chars} ký tự"
+        reply_text += (
+            f"\n\n⚠️ input quá dài, đã cắt còn {settings.max_input_chars} ký tự"
         )
-
-    # ReAct loop: brain → tools → brain sees results → brain synthesizes reply.
-    # Each iteration executes one round of steps+actions, then re-calls brain with
-    # accumulated tool_results. Brain terminates by returning reply + empty work.
-    _tool_results: list[str] = []
-    prior_output = ""
-    saw_review_output = False
-
-    for _iter in range(settings.brain_max_iterations):
-        if _iter > 0:
-            await _progress(progress, "🧠 Brain tổng hợp kết quả tool...")
-            started = time.time()
-            try:
-                decision = await decide(
-                    text,
-                    summary=summary,
-                    messages=prior_messages,
-                    workspace_hint=_workspace_brain_hint(workspace) if workspace else None,
-                    tool_results=_tool_results,
-                )
-                tool_count += 1
-            except Exception as e:
-                tool_count += 1
-                log_run(
-                    agent="brain",
-                    input_text=text,
-                    output=None,
-                    status="error",
-                    duration_ms=int((time.time() - started) * 1000),
-                    thread_ts=thread_ts,
-                    channel=channel,
-                    user_id=user_id,
-                    error=str(e),
-                )
-                result.errors.append(f"brain iter {_iter}: {e}")
-                break
-            log_run(
-                agent="brain",
-                input_text=text,
-                output=decision.raw,
-                status="ok",
-                duration_ms=int((time.time() - started) * 1000),
-                thread_ts=thread_ts,
-                channel=channel,
-                user_id=user_id,
-            )
-            if decision.need_clarification and decision.clarify_question:
-                return _with_footer(
-                    f"❓ {decision.clarify_question}", tool_count, t_start
-                )
-
-        has_reply = bool(
-            decision.reply and decision.reply.strip().lower() not in {"null", "none"}
-        )
-        no_more_work = not decision.steps and not decision.actions
-
-        if has_reply and no_more_work:
-            result.add(decision.reply)
-            break
-
-        # Execute this round's steps and actions, collecting outputs for brain.
-        round_results: list[str] = []
-        had_work = False
-
-        steps = decision.steps[: settings.max_steps]
-        if len(decision.steps) > settings.max_steps:
-            result.errors.append(
-                f"brain yêu cầu {len(decision.steps)} bước, chỉ chạy {settings.max_steps}"
-            )
-        for step in steps:
-            runner = REGISTRY.get(step.agent)
-            if not runner:
-                result.errors.append(f"unknown agent `{step.agent}`")
-                continue
-            tool_count += 1
-            task_preview = step.task[:80] + ("..." if len(step.task) > 80 else "")
-            await _progress(progress, f"⚙️ *{step.agent}*: {task_preview}")
-            t0 = time.time()
-            output: str | None = None
-            status = "error"
-            err: str | None = None
-            try:
-                if step.agent == "dev":
-                    context_for_step = _dev_context_for_step(prior_output, prior_messages)
-                    if workspace and Path(workspace["worktree"]).is_dir():
-                        dev_cwd = workspace["worktree"]
-                        ws_ctx = _workspace_context_block(workspace)
-                        context_for_step = (
-                            f"{ws_ctx}\n\n---\n{context_for_step}"
-                            if context_for_step else ws_ctx
-                        )
-                    else:
-                        dev_slug, dev_cwd = _dev_cwd_from_context(
-                            thread_row if thread_ts else None,
-                            text=text,
-                            prior_messages=prior_messages,
-                        )
-                        if dev_slug and thread_ts and not (thread_row or {}).get("repo"):
-                            update_thread_fields(thread_ts, repo=dev_slug)
-                    # Fall back to workspace_dir so dev can browse repos even when
-                    # no specific service path was resolved. apply_changes only when
-                    # a concrete repo was pinned to avoid stray edits.
-                    effective_cwd = dev_cwd or settings.workspace_dir or None
-                    if (
-                        settings.use_sdk
-                        and thread_ts
-                        and slack_client is not None
-                        and placeholder_ts
-                    ):
-                        pool = _pool_singleton()
-                        pending_perms = _pending_singleton()
-                        if pool is None or pending_perms is None:
-                            raise RuntimeError(
-                                "AGENTIC_USE_SDK=true but SDK singletons not initialized "
-                                "(main.py must call init_sdk_singletons)"
-                            )
-                        output = await run_dev_sdk(
-                            step.task,
-                            thread_ts=thread_ts,
-                            channel_id=channel or "",
-                            slack_client=slack_client,
-                            placeholder_ts=placeholder_ts,
-                            cwd=effective_cwd,
-                            context=context_for_step,
-                            pool=pool,
-                            pending=pending_perms,
-                        )
-                    else:
-                        output = await _run_dev_direct(
-                            step.task,
-                            context=context_for_step,
-                            cwd=effective_cwd,
-                            apply_changes=bool(dev_cwd),
-                        )
-                else:
-                    context_for_step, _ = _truncate(
-                        prior_output, settings.max_context_chars, label="context"
-                    )
-                    output = await runner(step.task, context=context_for_step)
-                status = "ok"
-            except Exception as e:
-                log.exception("agent %s failed", step.agent)
-                err = str(e)
-                result.errors.append(f"{step.agent}: {e}")
-            log_run(
-                agent=step.agent,
-                input_text=step.task,
-                output=output,
-                status=status,
-                duration_ms=int((time.time() - t0) * 1000),
-                thread_ts=thread_ts,
-                channel=channel,
-                user_id=user_id,
-                error=err,
-            )
-            if output:
-                round_results.append(f"[{step.agent}]\n{output}")
-                prior_output = output
-                if step.agent == "review":
-                    saw_review_output = True
-                had_work = True
-            if status == "ok":
-                last_agent = step.agent
-
-        actions = decision.actions[: settings.max_actions]
-        if len(decision.actions) > settings.max_actions:
-            result.errors.append(
-                f"brain yêu cầu {len(decision.actions)} actions, chỉ chạy {settings.max_actions}"
-            )
-        for action in actions:
-            await _progress(progress, f"📡 `{action.type}`...")
-            t0 = time.time()
-            tool_result = await _run_action(action)
-            tool_count += 1
-            display, status, error_code = _format_action_result(tool_result)
-            log_run(
-                agent=f"tool:{action.type}",
-                input_text=str(action.payload),
-                output=display,
-                status=status,
-                duration_ms=int((time.time() - t0) * 1000),
-                thread_ts=thread_ts,
-                channel=channel,
-                user_id=user_id,
-                error=error_code,
-            )
-            if (
-                status == "ok"
-                and action.type == "git.prepare_workspace"
-                and thread_ts
-                and isinstance(tool_result.data, dict)
-            ):
-                data = tool_result.data
-                fields: dict = {}
-                if data.get("ticket"):
-                    fields["active_ticket"] = data["ticket"]
-                if data.get("worktree_path"):
-                    fields["active_worktree"] = data["worktree_path"]
-                if data.get("github_repo"):
-                    fields["repo"] = data["github_repo"]
-                if fields:
-                    update_thread_fields(thread_ts, **fields)
-            if status == "ok" and _is_fix_pr_request(text, action):
-                tool_count += 1
-                fix_output, fix_status, fix_err = await _run_fix_after_pr_diff(
-                    action=action,
-                    diff=display,
-                    user_text=text,
-                    thread_ts=thread_ts,
-                    channel=channel,
-                    user_id=user_id,
-                )
-                if fix_status == "ok" and fix_output:
-                    round_results.append(f"[dev]\n{fix_output}")
-                    last_agent = "dev"
-                else:
-                    round_results.append(display)
-                    result.errors.append(f"dev: {fix_err or 'failed'}")
-                    last_agent = f"tool:{action.type}"
-                had_work = True
-            elif status == "ok" and _is_review_pr_request(text, action):
-                tool_count += 1
-                review_output, review_status, review_err = await _run_review_after_pr_diff(
-                    action=action,
-                    diff=display,
-                    thread_ts=thread_ts,
-                    channel=channel,
-                    user_id=user_id,
-                )
-                if review_status == "ok" and review_output:
-                    round_results.append(f"[review]\n{review_output}")
-                    last_agent = "review"
-                    saw_review_output = True
-                else:
-                    round_results.append(display)
-                    result.errors.append(f"review: {review_err or 'failed'}")
-                    last_agent = f"tool:{action.type}"
-                had_work = True
-            else:
-                round_results.append(f"[{action.type}]\n{display}")
-                if status == "ok":
-                    last_agent = f"tool:{action.type}"
-                had_work = True
-
-        _tool_results.extend(round_results)
-
-        if not had_work:
-            # Brain returned no actionable work; if it had a reply use it, else stop.
-            if has_reply:
-                result.add(decision.reply)
-            break
-
-    # Fallback: loop exhausted without brain producing a synthesized reply.
-    if not result.blocks and _tool_results:
-        for tr in _tool_results:
-            result.add(tr)
-
-    rendered = result.render()
-    if not saw_review_output:
-        if len(rendered) > _REPLY_SAFE_LEN:
-            tool_count += 1
-        rendered = await _shrink_reply(rendered)
+    if brain_result.error:
+        reply_text = f"{reply_text}\n\n⚠️ {brain_result.error}".strip()
     if thread_ts:
-        add_message(thread_ts, "assistant", rendered)
-        if last_agent:
-            update_thread_fields(thread_ts, last_agent=last_agent)
-        maybe_schedule_summary(thread_ts)
-    return _with_footer(rendered, tool_count, t_start)
+        # Durability/fallback for the recent_messages() path when a later Slack
+        # history fetch fails; the live session is the source of truth.
+        add_message(thread_ts, "assistant", reply_text)
+    return _with_footer(
+        reply_text,
+        brain_result.tool_use_count + 1,
+        t_start,
+        usage=brain_result.usage,
+        cost_usd=brain_result.cost_usd,
+    )

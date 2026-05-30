@@ -1,10 +1,11 @@
-"""Phase 1 smoke tests for the SDK dev path.
+"""Phase 1+3 hermetic tests for the SDK path.
 
-Hermetic — no real `claude` subprocess, no Slack network. Asserts:
+Asserts:
 - PendingPermissions Future create/resolve/timeout semantics
 - _needs_confirm wiring (whitelists empty by default in Phase 1)
-- build_dev_options shape (allow/deny lists, acceptEdits, resume from DB)
-- run_dev_sdk streams AssistantMessage text + persists session_id from ResultMessage
+- Slack permission callback button + timeout flow
+- Phase 3 sub-agents: AgentDefinition shape (po/ba/review/dev) +
+  brain options wires them into ClaudeAgentOptions.agents
 """
 
 from __future__ import annotations
@@ -15,20 +16,20 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from agentic.sdk import PendingPermissions, run_dev_sdk
-from agentic.sdk.dev_agent import make_dev_options_factory
-from agentic.sdk.dev_options import (
-    DEV_ALLOWED_TOOLS,
-    DEV_DISALLOWED_TOOLS,
-    build_dev_options,
-)
+from agentic.sdk import PendingPermissions
 from agentic.sdk.permission import (
     CONFIRM_BASH_PATTERNS,
     CONFIRM_TOOLS,
     _needs_confirm,
     build_slack_permission_callback,
 )
-from agentic.store import get_thread, init_db, touch_thread, update_thread_fields
+from agentic.sdk.sub_agents import (
+    DEV_ALLOWED_TOOLS,
+    DEV_DISALLOWED_TOOLS,
+    REVIEW_ALLOWED_TOOLS,
+    build_subagents,
+)
+from agentic.store import init_db, touch_thread
 
 
 async def test_pending_permissions_resolve_round_trip():
@@ -46,14 +47,17 @@ async def test_pending_permissions_resolve_unknown():
     assert pp.resolve("never-existed", allow=True) is False
 
 
-def test_phase1_whitelists_empty():
-    """Phase 1 ships empty whitelists — SDK skips can_use_tool for already-
-    allowed tools (per types.py:1748), so populating CONFIRM_BASH_PATTERNS
-    here would be a no-op. Documented in §8 / module docstring."""
-    assert CONFIRM_TOOLS == set()
+def test_confirm_tools_gate_destructive_pr_ops():
+    """github_merge_pr / github_approve_pr must require confirm — they have
+    user-visible side effects and aren't in any allowed_tools list. Matched in
+    both bare and `mcp__agentic__`-prefixed form. Bash push stays inline."""
+    assert CONFIRM_TOOLS == {"github_merge_pr", "github_approve_pr"}
     assert CONFIRM_BASH_PATTERNS == ()
     assert _needs_confirm("Bash", {"command": "git push origin main"}) is False
-    assert _needs_confirm("github_merge_pr", {}) is False
+    assert _needs_confirm("github_merge_pr", {}) is True
+    assert _needs_confirm("mcp__agentic__github_merge_pr", {}) is True
+    assert _needs_confirm("mcp__agentic__github_approve_pr", {}) is True
+    assert _needs_confirm("mcp__agentic__github_get_pr", {}) is False
 
 
 async def test_permission_callback_allows_when_not_in_whitelist():
@@ -69,7 +73,6 @@ async def test_permission_callback_allows_when_not_in_whitelist():
 
 async def test_permission_callback_timeout_denies(monkeypatch):
     """When a tool needs confirm and the user never clicks, callback denies."""
-    # Temporarily populate the whitelist for this test only.
     from agentic.sdk import permission as perm_mod
 
     monkeypatch.setattr(perm_mod, "CONFIRM_TOOLS", {"github_merge_pr"})
@@ -123,127 +126,69 @@ async def test_permission_callback_allow_via_button(monkeypatch):
     assert result.behavior == "allow"
 
 
-def test_build_dev_options_shape():
+# ============================================================================
+# Phase 3 — sub-agents
+# ============================================================================
+
+
+def test_build_subagents_keys():
+    agents = build_subagents()
+    assert set(agents.keys()) == {"po", "ba", "review", "dev"}
+
+
+def test_build_subagents_po_ba_text_only():
+    """po and ba are pure text gen — empty tools list, no MCP server."""
+    agents = build_subagents()
+    for key in ("po", "ba"):
+        ad = agents[key]
+        assert ad.tools == []
+        # mcpServers default is None when not passed.
+        assert ad.mcpServers is None
+        # permissionMode None → inherits the brain session's default.
+        assert ad.permissionMode is None
+        assert ad.prompt  # loaded from prompts/<key>.md
+        assert ad.description
+
+
+def test_build_subagents_review_has_read_and_mcp_pr_tools():
+    ad = build_subagents()["review"]
+    assert ad.tools == REVIEW_ALLOWED_TOOLS
+    # Must include at least one MCP github tool so review can fetch its own diff.
+    assert any(t.startswith("mcp__agentic__github_get_pr") for t in ad.tools)
+    assert "Read" in ad.tools
+    assert ad.mcpServers == ["agentic"]
+    assert ad.permissionMode is None  # read-only, no edits
+
+
+def test_build_subagents_dev_locked_down():
+    ad = build_subagents()["dev"]
+    assert ad.tools == DEV_ALLOWED_TOOLS
+    assert ad.disallowedTools == DEV_DISALLOWED_TOOLS
+    assert ad.permissionMode == "acceptEdits"
+    # Force-push / reset --hard must stay blocked.
+    assert "Bash(git push --force:*)" in ad.disallowedTools
+    assert "Bash(git reset --hard:*)" in ad.disallowedTools
+
+
+async def test_brain_options_factory_wires_subagents():
+    """make_brain_options_factory must populate ClaudeAgentOptions.agents with
+    the four AgentDefinitions so the brain can delegate via Task."""
+    from agentic.sdk.brain_session import make_brain_options_factory
+
     init_db()
-    thread_ts = "1700000000.dev01"
-    touch_thread(thread_ts, "C_TEST")
+    thread_ts = "1700000000.brain01"
+    touch_thread(thread_ts, "C_BRAIN")
 
-    opts = build_dev_options(
-        thread_ts=thread_ts,
-        cwd=None,
-        permission_cb=None,
-        session_store=None,
-    )
-    assert opts.permission_mode == "acceptEdits"
-    assert opts.allowed_tools == DEV_ALLOWED_TOOLS
-    assert opts.disallowed_tools == DEV_DISALLOWED_TOOLS
-    assert opts.include_partial_messages is True
-    # No prior session_id persisted yet → resume is None.
-    assert opts.resume is None
-
-
-def test_build_dev_options_resume_from_thread_row():
-    init_db()
-    thread_ts = "1700000000.dev02"
-    touch_thread(thread_ts, "C_TEST")
-    update_thread_fields(thread_ts, sdk_session_id="prev-session-uuid")
-
-    opts = build_dev_options(
-        thread_ts=thread_ts,
-        cwd=None,
-        permission_cb=None,
-        session_store=None,
-    )
-    assert opts.resume == "prev-session-uuid"
-
-
-async def test_run_dev_sdk_streams_and_persists_session_id(monkeypatch):
-    """Drive run_dev_sdk against a fake pool/client that yields a tiny
-    AssistantMessage stream + ResultMessage; assert session_id lands in DB
-    and the placeholder gets at least one chat_update."""
-    init_db()
-    thread_ts = "1700000000.dev03"
-    touch_thread(thread_ts, "C_TEST")
-
-    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
-
-    asst = AssistantMessage(
-        content=[TextBlock(text="đã sửa xong file foo.py")], model="opus"
-    )
-    result = ResultMessage(
-        subtype="success",
-        duration_ms=10,
-        duration_api_ms=5,
-        is_error=False,
-        num_turns=1,
-        session_id="new-session-uuid",
-        result="đã sửa xong file foo.py",
-        usage={"input_tokens": 1, "output_tokens": 1},
-        total_cost_usd=0.001,
-    )
-
-    async def fake_stream():
-        yield asst
-        yield result
-
-    fake_client = SimpleNamespace(
-        query=AsyncMock(),
-        receive_response=lambda: fake_stream(),
-    )
-
-    pool = SimpleNamespace(
-        get_or_create=AsyncMock(return_value=fake_client),
-    )
-
-    # Force the streaming edit by zeroing the debounce window.
-    from agentic.sdk import dev_agent as da
-    monkeypatch.setattr(da, "_STREAM_EDIT_INTERVAL_S", 0.0)
-
-    slack = AsyncMock()
-    slack.chat_update = AsyncMock(return_value={"ok": True})
-
-    out = await run_dev_sdk(
-        "task: fix foo.py",
-        thread_ts=thread_ts,
-        channel_id="C_TEST",
-        slack_client=slack,
-        placeholder_ts="9999.0001",
-        cwd=None,
-        context="",
-        pool=pool,
-        pending=PendingPermissions(),
-    )
-
-    assert out == "đã sửa xong file foo.py"
-    slack.chat_update.assert_awaited()
-    fake_client.query.assert_awaited_once()
-    row = get_thread(thread_ts)
-    assert row["sdk_session_id"] == "new-session-uuid"
-
-
-async def test_options_factory_resolves_channel_from_thread(monkeypatch):
-    """Factory should pull channel out of the threads table so the permission
-    callback posts buttons to the right place."""
-    init_db()
-    thread_ts = "1700000000.dev04"
-    touch_thread(thread_ts, "C_FACTORY")
-
-    captured: dict = {}
-
-    def fake_build_cb(*, pending, slack_client, channel_id, thread_ts):
-        captured["channel_id"] = channel_id
-        captured["thread_ts"] = thread_ts
-        return "CB-SENTINEL"
-
-    from agentic.sdk import dev_agent as da
-
-    monkeypatch.setattr(da, "build_slack_permission_callback", fake_build_cb)
-
-    factory = make_dev_options_factory(
+    factory = make_brain_options_factory(
         pending=PendingPermissions(),
         session_store=None,
         slack_client=AsyncMock(),
     )
     opts = await factory(thread_ts)
-    assert captured == {"channel_id": "C_FACTORY", "thread_ts": thread_ts}
-    assert opts.can_use_tool == "CB-SENTINEL"
+    assert set(opts.agents.keys()) == {"po", "ba", "review", "dev"}
+    assert opts.permission_mode == "default"
+    assert "agentic" in opts.mcp_servers
+    # Phase 4 — hooks wired for tool logging + compaction (§12.J).
+    assert set(opts.hooks) == {
+        "PreToolUse", "PostToolUse", "PostToolUseFailure", "PreCompact"
+    }

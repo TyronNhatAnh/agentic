@@ -99,28 +99,6 @@ def _placeholder_for(text: str) -> str:
     return "⏳ Đang xử lý..."
 
 
-def _progress_messages_for(text: str) -> list[str]:
-    lowered = text.lower()
-    if any(w in lowered for w in ("fix", "sửa", "sua", "patch")) and (
-        "pr" in lowered or "pull/" in lowered
-    ):
-        return [
-            "⏳ Đang fetch PR diff và chuẩn bị worktree...",
-            "🛠️ Đang để Claude Code đọc repo và sửa file...",
-            "🧪 Đang đợi verify/test hoặc tổng hợp kết quả...",
-        ]
-    if "review" in lowered and ("pr" in lowered or "pull/" in lowered):
-        return [
-            "⏳ Đang fetch PR diff...",
-            "🔎 Đang review trên local worktree nếu có...",
-            "📝 Đang tổng hợp findings...",
-        ]
-    return [
-        "⏳ Đang nghĩ tiếp...",
-        "⏳ Vẫn đang xử lý, đợi xíu nha...",
-    ]
-
-
 def _to_slack_mrkdwn(text: str) -> str:
     lines: list[str] = []
     for line in text.splitlines():
@@ -281,21 +259,12 @@ def register(
                     text=part,
                 )
 
-        async def progress(msg: str) -> None:
-            await client.chat_update(
-                channel=channel,
-                ts=placeholder["ts"],
-                text=_to_slack_mrkdwn(msg),
-            )
-
         job = Job(
             text=text,
             thread_ts=thread_ts,
             channel=channel,
             user_id=user_id,
             reply=reply,
-            progress=progress,
-            progress_messages=_progress_messages_for(text),
             thread_history=thread_history,
             slack_client=client,
             placeholder_ts=placeholder["ts"],

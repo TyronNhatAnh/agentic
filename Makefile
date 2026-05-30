@@ -1,4 +1,4 @@
-.PHONY: help install venv run debug restart stop status logs test lint clean db-show db-reset pidfile
+.PHONY: help install venv run debug restart stop status logs test lint clean db-show db-stats db-reset pidfile
 
 PYTHON      ?= python3
 VENV        ?= .venv
@@ -23,6 +23,7 @@ help:
 	@echo "  make logs        tail $(LOG_FILE)"
 	@echo "  make test        run pytest"
 	@echo "  make db-show     show last 20 rows of runs table"
+	@echo "  make db-stats    cache_read ratio / cost-per-thread / tool fail rate"
 	@echo "  make db-reset    delete local SQLite db ($(DB))"
 	@echo "  make clean       remove caches and __pycache__"
 
@@ -73,6 +74,14 @@ test:
 
 db-show:
 	@sqlite3 $(DB) "select id, agent, status, duration_ms, substr(input,1,60) from runs order by id desc limit 20;"
+
+db-stats:
+	@echo "== brain cache_read ratio =="
+	@sqlite3 $(DB) "select round(coalesce(sum(cache_read_input_tokens),0)*1.0 / nullif(sum(cache_read_input_tokens+cache_creation_input_tokens),0), 3) as cache_read_ratio from runs where agent='brain';"
+	@echo "== cost per thread (top 10) =="
+	@sqlite3 -header -column $(DB) "select thread_ts, round(sum(cost_usd),4) as cost_usd, sum(num_turns) as turns from runs where cost_usd is not null group by thread_ts order by cost_usd desc limit 10;"
+	@echo "== tool fail rate =="
+	@sqlite3 $(DB) "select round(sum(status='error')*1.0/count(*), 3) as fail_rate, count(*) as tool_calls from runs where agent like '%\_%' escape '\';"
 
 db-reset:
 	@rm -f $(DB) && echo "removed $(DB) (will be recreated on next start)"

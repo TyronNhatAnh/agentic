@@ -1,39 +1,10 @@
-from agentic.brain import _format_messages, parse_decision
+"""Thread-history rendering for the brain user message.
 
+`_format_messages` moved into sdk/brain_session.py at the Phase 5 cutover (the
+JSON-decision parser it used to live beside is gone — the brain emits native
+tool_use blocks now, so there is nothing to parse)."""
 
-def test_parse_direct_reply():
-    raw = '{"reply": "hello", "need_clarification": false, "steps": [], "actions": []}'
-    d = parse_decision(raw)
-    assert d.reply == "hello"
-    assert d.steps == []
-    assert not d.need_clarification
-
-
-def test_parse_clarification():
-    raw = '{"need_clarification": true, "clarify_question": "Which repo?", "steps": []}'
-    d = parse_decision(raw)
-    assert d.need_clarification
-    assert d.clarify_question == "Which repo?"
-
-
-def test_parse_steps_and_actions():
-    raw = """```json
-    {
-      "reply": null,
-      "need_clarification": false,
-      "steps": [
-        {"agent": "ba", "task": "write story for login"},
-        {"agent": "dev", "task": "draft code"}
-      ],
-      "actions": [
-        {"type": "github.create_issue", "payload": {"title": "x", "body": "y"}}
-      ]
-    }
-    ```"""
-    d = parse_decision(raw)
-    assert [s.agent for s in d.steps] == ["ba", "dev"]
-    assert d.actions[0].type == "github.create_issue"
-    assert d.actions[0].payload["title"] == "x"
+from agentic.sdk.brain_session import _format_messages
 
 
 def test_format_messages_keeps_useful_thread_history():

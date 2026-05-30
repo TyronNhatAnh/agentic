@@ -1,0 +1,127 @@
+"""Phase 4 hermetic tests — hooks (§12.J) + observability columns (§12.K).
+
+Asserts:
+- build_brain_hooks registers the four hook events
+- Pre/Post tool hooks write a runs row with the right agent/status/duration
+- PostToolUseFailure logs an error row
+- Secret tokens are redacted from the logged tool-input preview
+- log_run persists the usage/cost/num_turns columns; tool rows leave them null
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from agentic import store
+from agentic.sdk.hooks import _redact, build_brain_hooks
+from agentic.store import init_db, log_run
+
+
+@pytest.fixture(autouse=True)
+def _db(tmp_path, monkeypatch):
+    monkeypatch.setattr(store.settings, "agentic_db", str(tmp_path / "t.db"))
+    store._PRAGMAS_APPLIED = False
+    init_db()
+
+
+def _rows():
+    with store.connect() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM runs ORDER BY id")]
+
+
+def test_build_brain_hooks_registers_events():
+    hooks = build_brain_hooks(thread_ts="t1", channel="C1")
+    assert set(hooks) == {
+        "PreToolUse", "PostToolUse", "PostToolUseFailure", "PreCompact"
+    }
+    # Each event carries a single HookMatcher with one callback.
+    for matchers in hooks.values():
+        assert len(matchers) == 1
+        assert len(matchers[0].hooks) == 1
+
+
+async def test_pre_post_tool_logs_ok_row_with_duration():
+    hooks = build_brain_hooks(thread_ts="t1", channel="C1")
+    pre = hooks["PreToolUse"][0].hooks[0]
+    post = hooks["PostToolUse"][0].hooks[0]
+
+    inp = {
+        "tool_name": "github_get_pr",
+        "tool_input": {"pr": 7},
+        "tool_use_id": "tu_1",
+    }
+    await pre(inp, "tu_1", None)
+    await post(inp, "tu_1", None)
+
+    rows = _rows()
+    assert len(rows) == 1
+    assert rows[0]["agent"] == "github_get_pr"
+    assert rows[0]["status"] == "ok"
+    assert rows[0]["thread_ts"] == "t1"
+    assert rows[0]["channel"] == "C1"
+    assert rows[0]["duration_ms"] >= 0
+    # Tool rows leave the observability columns null.
+    assert rows[0]["cost_usd"] is None
+    assert rows[0]["input_tokens"] is None
+
+
+async def test_post_tool_failure_logs_error_row():
+    hooks = build_brain_hooks(thread_ts="t1", channel="C1")
+    fail = hooks["PostToolUseFailure"][0].hooks[0]
+    await fail(
+        {"tool_name": "jira_get_issue", "tool_input": {"key": "X-1"}, "error": "NOT_FOUND"},
+        "tu_2",
+        None,
+    )
+    rows = _rows()
+    assert rows[0]["status"] == "error"
+    assert rows[0]["error"] == "NOT_FOUND"
+
+
+async def test_tool_input_secrets_redacted_in_log():
+    hooks = build_brain_hooks(thread_ts="t1", channel="C1")
+    post = hooks["PostToolUse"][0].hooks[0]
+    await post(
+        {
+            "tool_name": "git_push",
+            "tool_input": {"url": "https://x-access-token:ghp_AAAAAAAAAAAAAAAAAAAA@github.com/o/r.git"},
+            "tool_use_id": "tu_3",
+        },
+        "tu_3",
+        None,
+    )
+    logged_input = _rows()[0]["input"]
+    assert "ghp_AAAAAAAAAAAAAAAAAAAA" not in logged_input
+    assert "«redacted»" in logged_input
+
+
+def test_redact_patterns():
+    assert "«redacted»" in _redact("ghp_0123456789ABCDEFghij")
+    assert "«redacted»" in _redact("token xoxb-123456789012-abcd")
+    assert _redact("plain text") == "plain text"
+
+
+def test_log_run_persists_usage_columns():
+    log_run(
+        agent="brain",
+        input_text="ping",
+        output="pong",
+        status="ok",
+        duration_ms=100,
+        thread_ts="t1",
+        channel="C1",
+        usage={
+            "cache_read_input_tokens": 90,
+            "cache_creation_input_tokens": 10,
+            "input_tokens": 100,
+            "output_tokens": 20,
+        },
+        cost_usd=0.05,
+        num_turns=2,
+    )
+    row = _rows()[0]
+    assert row["cache_read_input_tokens"] == 90
+    assert row["cache_creation_input_tokens"] == 10
+    assert row["output_tokens"] == 20
+    assert row["cost_usd"] == 0.05
+    assert row["num_turns"] == 2

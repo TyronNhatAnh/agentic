@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Slack bot (Socket Mode, `slack-bolt` async) that routes user messages to specialized role-based sub-agents. Each "agent" is a subprocess call to the local `claude` CLI (`claude -p ... --system-prompt ...`) with a role-specific markdown prompt from [src/agentic/prompts/](src/agentic/prompts/). The bot itself depends on a working `claude login` on the host. Default prompt language is Vietnamese.
+A Slack bot (Socket Mode, `slack-bolt` async) that routes user messages to a long-lived Claude Agent SDK session per thread. The brain (Claude with a system prompt + in-process MCP tools + sub-agents) decides intent, calls tools, and delegates work natively — Python is the tool runtime + safety boundary, not an orchestrator. The bot depends on a working `claude login` on the host (no API key; `claude --version` must be ≥ `MIN_CLAUDE_VERSION`). Default prompt language is Vietnamese.
+
+> **Architecture.** One `ClaudeSDKClient` per Slack thread ([sdk/brain_session.py](src/agentic/sdk/brain_session.py)), pooled by `ThreadSessionManager` ([sdk/client_pool.py](src/agentic/sdk/client_pool.py)) with idle-TTL eviction, resumed across restarts via `threads.sdk_session_id`. Sub-agents (dev/review/ba/po) are `AgentDefinition` entries in the same session ([sdk/sub_agents.py](src/agentic/sdk/sub_agents.py)), reached through the native `Task` tool. Integrations are in-process MCP `@tool`s ([sdk/mcp_tools.py](src/agentic/sdk/mcp_tools.py)). Permission, hooks, and observability are described below. The SDK migration is complete — there is no `claude -p` subprocess path and no `AGENTIC_USE_SDK` flag. History lives in [MIGRATION_PLAN.md](MIGRATION_PLAN.md).
 
 ## Common commands
 
@@ -15,42 +17,51 @@ Use the Makefile — do not invent equivalents.
 - `make start` / `make stop` / `make restart` / `make status` / `make logs` — background process via `.agentic.pid` + `agentic.log`
 - `make test` — runs `pytest -q` (pytest-asyncio in `auto` mode, testpaths=`tests`)
 - Single test: `.venv/bin/pytest tests/test_dispatcher.py::test_name -q`
-- `make db-show` / `make db-reset` — inspect or wipe `agentic.db`
+- `make db-show` — last 20 `runs` rows · `make db-stats` — cache_read ratio / cost-per-thread / tool fail rate · `make db-reset` — wipe `agentic.db`
 
-Required env (see [.env.example](.env.example)): `SLACK_BOT_TOKEN` (xoxb-), `SLACK_APP_TOKEN` (xapp-, Socket Mode). Optional: `GITHUB_TOKEN` + `GITHUB_DEFAULT_REPO`, `JIRA_*`, `SLACK_ALLOWED_CHANNELS` (comma-separated channel names; empty = all allowed), `WORKER_CONCURRENCY` (default 4), `CLAUDE_BIN`/`CLAUDE_TIMEOUT`, `WORKSPACE_DIR`/`WORKTREE_DIR` (where git agents clone/checkout — must be set if you use git actions), `AGENTIC_SERVICES_JSON` (path to a JSON list of service repo seeds — schema: `[{name, repo_path, github_repo, base_branch_template?, jira_board_id?, aliases?}]`).
+Required env (see [.env.example](.env.example)): `SLACK_BOT_TOKEN` (xoxb-), `SLACK_APP_TOKEN` (xapp-, Socket Mode). Optional: `GITHUB_TOKEN` + `GITHUB_DEFAULT_REPO`, `JIRA_*`, `SLACK_ALLOWED_CHANNELS` (comma-separated channel names; empty = all allowed), `WORKER_CONCURRENCY` (default 4), `CLAUDE_BIN`, `WORKSPACE_DIR`/`WORKTREE_DIR` (where git work clones/checkouts land — must be set if you use git actions), `AGENTIC_SERVICES_JSON` (path to a JSON list of service repo seeds — schema: `[{name, repo_path, github_repo, base_branch_template?, jira_board_id?, aliases?}]`), `SDK_SESSION_IDLE_TTL_S` (default 1800), `SDK_MAX_CONCURRENT_SESSIONS` (default 20), `MIN_CLAUDE_VERSION`.
 
 ## Request lifecycle
 
-1. [slack_handlers.py](src/agentic/slack_handlers.py) receives `app_mention` (DMs are intentionally ignored), checks channel allowlist via cached `conversations_info`, fetches the thread via `conversations.replies` (so non-mention user messages — e.g. a teammate posting a PR link — are visible to the brain), posts a "Đang xử lý..." placeholder, and submits a `Job` (with `thread_history`) to the `JobRunner`.
-2. [worker.py](src/agentic/worker.py) `JobRunner` is an in-process async queue with N workers and a per-`thread_ts` busy set — concurrent requests in the same thread are rejected (`_BUSY_MSG`) rather than queued.
-3. [dispatcher.py](src/agentic/dispatcher.py) `handle_message` is the orchestrator:
-   - prefers `thread_history` from Slack (passed via the `Job`); falls back to `recent_messages` from SQLite if empty,
-   - calls [brain.py](src/agentic/brain.py) `decide()` which runs `claude -p` with [prompts/brain.md](src/agentic/prompts/brain.md) and parses a JSON response with shape `{reply, need_clarification, clarify_question, steps:[{agent,task}], actions:[{type,payload}]}`,
-   - runs each `step.agent` via `REGISTRY` ([agents/__init__.py](src/agentic/agents/__init__.py)), passing the previous step's output as `context`,
-   - runs each `action` through [integrations/github.py](src/agentic/integrations/github.py) or [integrations/jira.py](src/agentic/integrations/jira.py) with retry (`_MAX_RETRIES=2`, only when `ToolResult.retryable` **and** the action is read-only; write actions — `github.create_*`/`github.comment_*`/`github.approve_*`/`github.merge_*`/`jira.create_*`/`jira.comment_*`/`jira.transition_*`/`git.*` — are never retried to avoid duplicates),
-   - logs every step into the `runs` table and schedules a thread summary via [summarizer.py](src/agentic/summarizer.py).
-4. The placeholder Slack message is edited in place with the rendered result. Non-review replies are passed through `_shrink_reply` (cap `_REPLY_SAFE_LEN = 2500` chars, summarized by `claude -p` if longer) and chunked at `_SLACK_CHUNK_LEN = 3500` chars per Slack message.
+1. [slack_handlers.py](src/agentic/slack_handlers.py) receives `app_mention` (DMs are intentionally ignored), checks the channel allowlist via cached `conversations_info`, fetches the thread via `conversations.replies` (so non-mention user messages — e.g. a teammate posting a PR link — are visible to the brain), posts a "Đang xử lý..." placeholder, and submits a `Job` (with `thread_history`, `slack_client`, `placeholder_ts`) to the `JobRunner`. It also registers the `perm_allow`/`perm_deny` button handlers.
+2. [worker.py](src/agentic/worker.py) `JobRunner` is an in-process async queue with N workers and a per-`thread_ts` busy set — concurrent requests in the same thread are rejected rather than queued. It forwards `slack_client` + `placeholder_ts` to the handler.
+3. [dispatcher.py](src/agentic/dispatcher.py) `handle_message` (~290 LoC) is thin:
+   - resolves any worktree already prepared for the ticket in play (`_resolve_active_workspace`) and persists `active_ticket`/`active_worktree`/`repo` to the thread row, so a workspace hint can route fix/PR work to the dev sub-agent;
+   - delegates the whole turn to `run_brain_session` ([sdk/brain_session.py](src/agentic/sdk/brain_session.py)) — gets/creates the thread's `ClaudeSDKClient`, sends the user message (with Slack `thread_history` + workspace hint injected into the **user message only**, never the system prompt, to keep the cache prefix stable), and streams the brain's reply into the Slack placeholder (debounced ~1.5s, with `chat.update` 429/Retry-After backoff);
+   - logs one `brain` row to `runs` carrying the session usage/cost (per-tool rows are written by hooks, see below);
+   - returns the final reply text + a `🛠️ N tool · Xs · tok · $cost` footer.
+4. The worker edits the placeholder in place with the returned reply (final flush), chunking long messages.
 
-## Confirmation flow for destructive actions
+The streamed partial text **is** the progress indicator — there is no separate progress-message loop (it would fight the stream for the same `chat.update` target). The `Job` carries no `progress` callback.
 
-`github.approve_pr`, `github.merge_pr`, and the base-branch fallback path of `git.prepare_workspace` defer side effects until the user confirms. The pattern:
+The brain emits native `tool_use` blocks; the SDK validates input against each `@tool`'s typed schema and runs it. There is **no** JSON-from-stdout parsing and no Python ReAct loop — the SDK orchestrates tool calls and sub-agent delegation.
 
-- First invocation: handler returns `ToolResult.failure("NEEDS_CONFIRMATION", question)` with `result.data = {"action_type": ..., "payload": {..., "confirmed": True}}`. Dispatcher persists this to the `pending_confirmations` table (TTL 30 min) and renders the question with a ❓ prefix.
-- Next user message: `dispatcher._is_affirmative` / `_is_negative` match against a closed set (`ok`, `ừ`, `được`, `cancel`, ...); affirmative → `_run_pending` re-invokes the action with the saved payload (now `confirmed=True`) which executes the real side effect. Any other reply clears the pending row and falls through to the brain.
-- `github.merge_pr` additionally re-checks `mergeable_state` ∈ `{clean, unstable}` on **both** the confirm prompt and the resumed execution; states like `dirty`/`blocked`/`behind`/`draft` are refused with a clear reason rather than retried.
+## Permission / confirmation flow for destructive actions
 
-Brain prompt must **not** ask its own confirm for these actions — orchestrator owns the confirm step.
+`github_merge_pr` and `github_approve_pr` (the `CONFIRM_TOOLS` set, [sdk/permission.py](src/agentic/sdk/permission.py)) require user confirmation. The mechanism is a `can_use_tool` callback, **not** text parsing:
 
-## Agent subprocess contract
+- The brain calls the tool → the callback (`build_slack_permission_callback`) checks the whitelist, posts a Slack message with ✅/❌ block-kit buttons, creates an in-memory `asyncio.Future` keyed by `req_id`, and `await`s it (timeout 5' → auto-Deny).
+- The user clicks a button → the `perm_allow`/`perm_deny` action handler calls `pending.resolve(req_id, allow)`, which completes the Future → the callback returns `PermissionResultAllow/Deny`. The SDK session blocks in its own async context, so nothing is persisted across turns.
+- A text reply (instead of a button click) falls through to the brain as a normal message; the pending Future keeps waiting for a button or timeout. We do **not** parse yes/no from text.
+- `github_merge_pr` re-checks `mergeable_state` ∈ `{clean, unstable}` inside the tool body before the side effect; bad states return a `VALIDATION` error for the brain to relay. The brain prompt must **not** ask its own confirm — the callback owns it.
 
-All agents and the brain share [agents/base.py](src/agentic/agents/base.py) `run_claude()`:
-- Spawns `claude -p <user_prompt> --system-prompt <system_prompt> --output-format text`.
-- Times out per `CLAUDE_TIMEOUT`. Non-zero exit raises `ClaudeRunError` with stderr.
-- The brain's stdout must contain a JSON object; `brain._extract_json` is tolerant of code fences. Parse failures fall back to returning the raw text as `reply` (no steps/actions executed).
+Tools that aren't in `CONFIRM_TOOLS` and aren't in any `allowed_tools` list still fire the callback and are auto-allowed. (The SDK skips `can_use_tool` for tools already in `allowed_tools` — so gating an allow-listed tool requires a `PreToolUse` hook, not the callback.)
 
-When adding a new agent: create `src/agentic/agents/<name>.py` that exposes `async def run_<name>(task: str, *, context: str = "") -> str`, add a `prompts/<name>.md`, and register it in `agents/__init__.py::REGISTRY`. The brain prompt must also be updated to know the new role exists.
+## Hooks (audit + observability)
 
-When adding a new integration action: extend the relevant `integrations/*.py` `execute_action(type, payload)` dispatcher and return a `ToolResult` (see [integrations/result.py](src/agentic/integrations/result.py)). `error_code` values `AUTH`/`CONFIG`/`VALIDATION`/`NOT_FOUND` render as ⚠️ (non-retryable user errors); others render as ❌. Internal/transport codes (`UNKNOWN_ACTION`/`UNKNOWN`/`SERVER`/`NETWORK`/`TIMEOUT`/`RATE_LIMIT`) are rewritten by `dispatcher._USER_FRIENDLY_ERROR_MESSAGES` to a Vietnamese explanation so users don't see raw internal strings; the raw `user_message` is logged for debugging. Action `type` must use the `<integration>.<verb>` prefix — the dispatcher routes on prefix.
+[sdk/hooks.py](src/agentic/sdk/hooks.py) `build_brain_hooks(thread_ts, channel)` is wired into the brain options factory per thread:
+
+- `PreToolUse` — stamps a monotonic start keyed by `tool_use_id` (audit; no-op output).
+- `PostToolUse` / `PostToolUseFailure` — single-writer for per-tool `runs` rows (ok / error + duration). PostToolUse only fires on success, so failures need their own hook. Secret tokens (`ghp_…`, `xox?-…`, `x-access-token:…`, `//user:pass@…`) are redacted from the logged input preview — audit-only, the tool input itself is not mutated.
+- `PreCompact` — `log.warning(trigger=...)`. The SDK fires this when compaction is already happening (auto-compaction handles long threads natively); it is not an "almost full" forecast and posts nothing to Slack.
+
+## Adding a sub-agent
+
+Add an entry to `build_subagents()` in [sdk/sub_agents.py](src/agentic/sdk/sub_agents.py): an `AgentDefinition` with `description`, `prompt=load_prompt("<name>")`, `tools` (subset; use `mcp__agentic__<tool>` for MCP tools and pass `mcpServers=["agentic"]`), `model`, and optional `permissionMode`/`disallowedTools`. Drop a `prompts/<name>.md`, and mention when to pick the role in [prompts/brain_sdk.md](src/agentic/prompts/brain_sdk.md) (the `description` is WHAT the agent does — auto-injected into the `Task` tool schema; the brain prose is WHEN to use it). Prompt strings + tool lists are read once at process start so the session prefix cache stays warm. Current roles: po/ba (text-only, `tools=[]`), review (read + git diff/log/show + `github_get_pr{,_diff}`), dev (`acceptEdits`, full git/gh via Bash, force-push/reset blocked via `disallowedTools`).
+
+## Adding an integration action
+
+Extend the relevant `integrations/*.py` `execute_action(type, payload)` dispatcher and return a `ToolResult` (see [integrations/result.py](src/agentic/integrations/result.py)). Then expose it as a `@tool` in [sdk/mcp_tools.py](src/agentic/sdk/mcp_tools.py) with a typed `input_schema` (1-1 with the legacy `<integration>.<verb>` action; tool name is the action type with `.`→`_`, e.g. `github_get_pr`), include it in `build_agentic_mcp_server()`, and reference it as `mcp__agentic__<tool_name>` in any agent's `tools` allowlist. Wrap the call in `_run_with_retry(retryable_read=...)`: read-only tools retry transient errors (TIMEOUT/NETWORK/SERVER/RATE_LIMIT) 2× with backoff; write tools never retry (a timed-out POST may have succeeded). `error_code` values `AUTH`/`CONFIG`/`VALIDATION`/`NOT_FOUND` are user-facing; internal/transport codes are returned to the brain as `{"ok": false, ...}` for it to relay. If a tool has user-visible side effects and shouldn't auto-run, add it to `CONFIRM_TOOLS`.
 
 ## Design principle: let the model reason
 
@@ -58,19 +69,19 @@ This bot is powered by a capable model; do not turn it into a brittle rule engin
 
 - Prefer passing high-quality thread context, tool outputs, and structured state to the brain/agents so the model can decide intent, continuity, and whether a request was already handled.
 - Keep Python code focused on deterministic plumbing: Slack delivery, job orchestration, retries, persistence, tool execution, output formatting, and hard safety/validation boundaries.
-- Avoid overfitting user intent with hard-coded phrase checks such as "if the user says X, always do Y" unless it protects a real integration boundary or prevents a concrete failure.
+- Avoid overfitting user intent with hard-coded phrase checks such as "if the user says X, always do Y" unless it protects a real integration boundary or prevents a concrete failure. Match SDK tool descriptors (`tool_name`, `tool_input`) for permission, not user message text.
 - If behavior seems wrong, first improve the context/prompt contract or agent handoff. Add rules only when the decision is truly deterministic and cheaper/safer outside the model.
-- For repeated requests, prefer giving the brain enough recent history and summaries to answer naturally over implementing per-intent duplicate detectors.
 
 ## Persistence
 
 SQLite at `AGENTIC_DB` (default `agentic.db`). Schema in [store.py](src/agentic/store.py):
-- `runs` — every brain/agent/tool invocation (use `make db-show` to inspect).
-- `threads` — one row per Slack thread, holds `summary`, `last_agent`, `jira_keys`, `pr_refs`, `repo`. `init_db()` migrates older DBs by `ALTER TABLE ADD COLUMN` on startup, so adding a new thread field requires updating both `SCHEMA` and `_THREAD_ADDED_COLUMNS`/`_THREAD_FIELDS`.
-- `messages` — assistant-side chat history; durability/fallback only. Live user context now comes from Slack `conversations.replies` per request.
-- `pending_confirmations` — one row per thread holding a deferred action (`action_type`, `payload`, `question`) for the confirmation flow above. TTL 30 min via `PENDING_CONFIRMATION_TTL_S`.
+- `runs` — every brain/tool invocation. The `brain` row carries observability columns (`cache_read_input_tokens`, `cache_creation_input_tokens`, `input_tokens`, `output_tokens`, `cost_usd`, `num_turns`) filled from `ResultMessage.usage`; tool rows (written by hooks) leave them null. `init_db()` migrates older DBs via `_RUNS_ADDED_COLUMNS` (mirror of the thread-column migration). `make db-stats` reads these.
+- `threads` — one row per Slack thread: `repo`, `active_ticket`, `active_worktree`, plus `sdk_session_id` (resume token) + `sdk_state_blob` (transcript snapshot) so the brain session survives a process restart. `init_db()` migrates older DBs by `ALTER TABLE ADD COLUMN`, so adding a thread field means updating `SCHEMA` and `_THREAD_ADDED_COLUMNS`/`_THREAD_FIELDS`.
+- `messages` — assistant-side chat history; durability/fallback for `recent_messages()` when a Slack `conversations.replies` fetch returns nothing. Live context is the SDK session + Slack history.
 - `service_repos` — local service registry seeded from `AGENTIC_SERVICES_JSON` on startup.
+
+Confirmation state is in-memory only (`PendingPermissions` Futures) — there is no `pending_confirmations` table.
 
 ## Testing notes
 
-`tests/` currently covers brain JSON parsing and dispatcher orchestration with mocked agent runners; there are no live `claude`/Slack/GitHub calls. When adding tests that touch the dispatcher, mock `REGISTRY` entries and `_invoke_integration` rather than the subprocess layer.
+`tests/` is hermetic — no live `claude`/Slack/GitHub calls. Coverage: permission Future semantics + callback flow ([test_sdk_phase1.py](tests/test_sdk_phase1.py)), hooks + observability columns ([test_sdk_phase4.py](tests/test_sdk_phase4.py)), brain options/sub-agent shape, thread-history rendering ([test_brain_routing.py](tests/test_brain_routing.py)), service resolution + brain delegation ([test_dispatcher.py](tests/test_dispatcher.py)), MCP build + session caching/eviction ([test_sdk_smoke.py](tests/test_sdk_smoke.py)). When testing the dispatcher, monkeypatch `run_brain_session` + the `_brain_pool_singleton`/`_pending_singleton` getters rather than the SDK transport.

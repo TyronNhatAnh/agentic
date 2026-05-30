@@ -1,5 +1,7 @@
 # Migration Plan — `claude -p` subprocess → `claude-agent-sdk`
 
+> **✅ MIGRATION COMPLETE 2026-05-30.** Phases 0–5 done; `AGENTIC_USE_SDK` flag + legacy subprocess path đã xoá. Còn lại chỉ là load test trên traffic thật (§3 Phase 5 cuối) + đo metrics §9. File này giờ là lịch sử + contract reference; kiến trúc hiện hành ở [CLAUDE.md](CLAUDE.md). Code work mới không cần đọc plan này trừ khi tra cứu quyết định cũ (§8) hoặc contract (§12).
+
 **Mục tiêu:** chuyển bot sang kiến trúc agent production-grade: per-thread session sống, function calling thật, prompt cache cao, sub-agent thấy nhau, permission flow native.
 
 ---
@@ -115,31 +117,35 @@ Cập nhật checkbox khi xong. **Mỗi phase merge được độc lập, có r
 - Không còn `KeyError`/`ValueError` từ malformed brain JSON
 - Latency p50 toàn request < 60% baseline
 
-### Phase 3 — Sub-agents → AgentDefinition (1-2 ngày)
-- [ ] Convert PO/BA/Review → `AgentDefinition` entries trong `ClaudeAgentOptions(agents=...)`
-- [ ] Mỗi agent: description, prompt (từ [prompts/](src/agentic/prompts/)), tools subset, model override nếu cần
-- [ ] Brain delegate qua native `Task` tool — bỏ Python `REGISTRY` dispatch ([agents/__init__.py](src/agentic/agents/__init__.py))
-- [ ] Xóa `agents/{po,ba,review}.py` (giữ `dev.py` vì worktree-aware logic riêng)
+### Phase 3 — Sub-agents → AgentDefinition (1-2 ngày) ✅ DONE 2026-05-30
+- [x] Convert PO/BA/Review/Dev → `AgentDefinition` entries trong `ClaudeAgentOptions(agents=...)` ([sdk/sub_agents.py](src/agentic/sdk/sub_agents.py))
+- [x] Mỗi agent: description, prompt (từ [prompts/](src/agentic/prompts/)), tools subset, model override; dev có `permissionMode="acceptEdits"` + `disallowedTools` boundary
+- [x] Brain delegate qua native `Task` tool — `agents=build_subagents()` ở `make_brain_options_factory` ([sdk/brain_session.py](src/agentic/sdk/brain_session.py))
+- [x] Xóa `agents/{po,ba,review}.py`; `REGISTRY = {"dev": run_dev}` còn lại cho legacy ReAct fallback (`AGENTIC_USE_SDK=false`)
+- [x] Retire dev SDK pool — `sdk/dev_agent.py` + `sdk/dev_options.py` xoá; brain pool single source. Dispatcher dead SDK dev branch (line ~894) xoá; legacy ReAct dev path giữ `_run_dev_direct`.
+- [ ] Eval 5 ticket: review fetch PR diff + cross-check worktree trong cùng 1 turn (chờ Phase 4 streaming + observability để chấm objective)
 
 **Pass criteria:** review agent đọc PR diff + cross-check file trong worktree **trong cùng 1 turn**, không cần Python ghép context.
 
 ### Phase 4 — Hooks + streaming + observability (2 ngày)
-- [ ] `HookMatcher(PreToolUse)` → audit log, redact secrets, insert `runs` table
-- [ ] `HookMatcher(PostToolUse)` → update_thread_fields, schedule summary (nếu giữ)
-- [ ] `HookMatcher(PreCompact)` → cảnh báo session sắp full
-- [ ] Slack streaming: edit placeholder mỗi 1.5s debounce (chú ý rate limit `chat.update`)
-- [ ] Bỏ [summarizer.py](src/agentic/summarizer.py) — dùng compaction native
-- [ ] Dashboard query: cost/thread, cache_read ratio, tool fail rate
+- [x] `HookMatcher(PreToolUse)` → redact secret + stamp `monotonic` start (audit). Row hoàn chỉnh ghi ở PostToolUse (§12.J — PreToolUse không có result). [sdk/hooks.py](src/agentic/sdk/hooks.py).
+- [x] `HookMatcher(PostToolUse)` + `PostToolUseFailure` → single-writer per-tool `runs` row (ok/error + duration). `sdk_session_id` persist vẫn ở `run_brain_session`; `summary` bỏ (Phase 5 xoá file). Gỡ stream-loop tool collection + dispatcher tool loop (tránh double-log).
+- [x] `HookMatcher(PreCompact)` → `log.warning(trigger=...)` (log-only — PreCompact fire khi compaction *đang* xảy ra, không phải "sắp full"; xem §8).
+- [x] Slack streaming: debounce 1.5s (đã có Phase 2) + xử lý `chat.update` 429/Retry-After backoff ([brain_session.py](src/agentic/sdk/brain_session.py) `_retry_after_seconds`). Final-flush do worker render lại placeholder.
+- [~] Bỏ [summarizer.py](src/agentic/summarizer.py) — **defer Phase 5** (legacy `decide()` còn đọc `summary`; SDK path đã không summarize). Xem §8 2026-05-30 Phase 4.
+- [x] Dashboard query: cost/thread, cache_read ratio, tool fail rate — `runs` thêm 6 cột obs (§12.K) + `make db-stats`.
+- [ ] Eval: xác nhận `runs` không mất event so với baseline trên traffic thật (chờ run live).
 
 **Pass criteria:** user thấy progress realtime; `runs` table không mất event so với baseline.
 
-### Phase 5 — Cleanup + harden (1-2 ngày)
-- [ ] Bỏ flag `AGENTIC_USE_SDK` (full cutover)
-- [ ] Xóa code legacy: [brain.py](src/agentic/brain.py), `pending_confirmations` schema cũ, [agents/base.py:run_claude](src/agentic/agents/base.py)
-- [ ] Update [CLAUDE.md](CLAUDE.md) — kiến trúc mới
-- [ ] Load test 10 thread × 5 turn — đo cost, latency, memory pool
+### Phase 5 — Cleanup + harden (1-2 ngày) ✅ DONE 2026-05-30
+- [x] Bỏ flag `AGENTIC_USE_SDK` (full cutover) — [config.py](src/agentic/config.py) drop field; [main.py](src/agentic/main.py) log line; [dispatcher.py](src/agentic/dispatcher.py) SDK path unconditional.
+- [x] Xóa code legacy: `brain.py`, `summarizer.py`, `agents/dev.py`, `agents/__init__.py` (REGISTRY), `pending_confirmations` table + 3 store helpers, `agents/base.py:run_claude` (+ `_usage_tracker`/`ClaudeRunError`). `agents/base.py` còn mỗi `load_prompt`. `prompts/brain.md` xoá.
+- [x] Inline `_format_messages` vào [brain_session.py](src/agentic/sdk/brain_session.py); xoá `brain.py`.
+- [x] Update [CLAUDE.md](CLAUDE.md) — kiến trúc SDK-only (bỏ legacy + `[SDK]` tags).
+- [ ] Load test 10 thread × 5 turn — đo cost, latency, memory pool (chờ traffic thật).
 
-**Pass criteria:** `dispatcher.py` xuống ≤ 700 LoC (từ 1086), feature parity.
+**Pass criteria:** `dispatcher.py` ≤ 700 LoC (đạt: **~290** từ 1023), feature parity. pytest 43 passed hermetic.
 
 ---
 
@@ -246,6 +252,18 @@ File ảnh hưởng: ...
 - **2026-05-30** — Phase 2 — Brain pool RIÊNG (không reuse Phase 1 dev pool). Lý do: `ThreadSessionManager` pin `options_factory` tại constructor; brain options (system_prompt, mcp_servers, permission_mode, no allowed_tools) khác hẳn dev. Step 4 sẽ tạo `_brain_pool` singleton song song `_pool` dev ở [main.py](src/agentic/main.py). Trade-off: 2 SDKClient/thread Phase 2-3 (idle TTL 30' nên không leak). Phase 3 merge khi dev convert sang `AgentDefinition` trong cùng brain session — xoá `_pool` dev. Alternative refactor pool nhận factory per-call bị reject: pin factory là intent để options stable cho cache.
 - **2026-05-30** — Phase 2 — Thread history render reuse `brain._format_messages` (budget cap có sẵn). Inject vào **user message per-turn** dưới header `## Bối cảnh thread (lịch sử Slack)`; `workspace_hint` dưới `## Workspace hiện tại`. System prompt + tool schema KHÔNG đổi per-turn — cache prefix stable. Phase 5 xoá `brain.py` sẽ inline `_format_messages` vào `brain_session.py`.
 - **2026-05-30** — Phase 2 — Step 5 cutover partial. Vấn đề: helper phrase-matching + legacy pending-text-parse confuse code khi maintain. Quyết định: xoá hẳn ngay Phase 2, không gate `if not use_sdk`. Trade-off: legacy rollback (`AGENTIC_USE_SDK=false`) mất confirm flow + local-repo shortcut; `brain.py` ReAct loop + REGISTRY vẫn live cho mọi luồng khác. `pending_confirmations` table + store fn (`get_/save_/clear_pending_confirmation`) giữ tới Phase 5. File ảnh hưởng: [dispatcher.py](src/agentic/dispatcher.py) (-~115 LoC), [tests/test_dispatcher.py](tests/test_dispatcher.py) (-2 tests → 49 total).
+- **2026-05-30** — Phase 3 — Dev gộp vào `agents={}` của brain (resolve mâu thuẫn §3↔§8). Lý do: §2 target arch ngầm yêu cầu sub-agent share session state với brain — chỉ dev pool riêng có nghĩa khi Phase 1 chưa có brain SDK. Phase 3 merge: `_pool` dev + `make_dev_options_factory` + `run_dev_sdk` xoá; `sdk/dev_agent.py` + `sdk/dev_options.py` xoá; constants `DEV_ALLOWED_TOOLS`/`DEV_DISALLOWED_TOOLS` chuyển vào `sdk/sub_agents.py`. `init_sdk_singletons(pool=...)` arg xoá; main.py còn 1 pool. Trade-off: legacy `AGENTIC_USE_SDK=false` rollback giữ subprocess `agents/dev.py` qua `_run_dev_direct`; po/ba/review legacy mất (REGISTRY rỗng 3 role) — accepted per §3 line 122 + user confirm "đi theo đề xuất".
+- **2026-05-30** — Phase 3 — Sub-agent tool subset chốt: po/ba `tools=[]` (text-only); review = `Read/Glob/Grep` + `Bash(git diff|log|show:*)` + `mcp__agentic__github_get_pr{,_diff}` (fetch + cross-check trong cùng turn — Phase 3 pass criteria); dev = legacy `_DEV_ALLOWED/DISALLOWED` (no MCP, dev dùng `gh`/`git` qua Bash y như Claude Code). `permissionMode` chỉ set cho dev (`acceptEdits`); review/po/ba inherit brain `default`. Cwd/worktree không qua `AgentDefinition` field (không có) — sub-agent inherit brain session cwd; per-turn worktree path đi qua user msg context (decision 2026-05-29).
+- **2026-05-30** — Phase 3 — brain_sdk.md giữ nguyên section "Sub-agents". `AgentDefinition.description` SDK auto inject vào `Task` tool schema (canonical) nhưng prose trong brain prompt là intent-routing hint (khi nào pick agent nào). Không xung đột: description = WHAT agent làm, brain prose = WHEN brain dùng agent. Phase 5 review nếu thấy duplicate thật sự thì cắt.
+- **2026-05-30** — Phase 4 — Per-tool logging chuyển từ stream-loop sang hook. Vấn đề: §3 line 129 ghi "PreToolUse → insert runs table" nhưng PreToolUse fire *trước* execution → không có `tool_response`/ok/duration để ghi 1 row hoàn chỉnh. Quyết định: **PostToolUse + PostToolUseFailure là single-writer** của tool runs row (PostToolUse chỉ fire khi success → SDK tách `PostToolUseFailure` cho lỗi; đăng ký cả 2 để không mất tool-fail). PreToolUse chỉ stamp `monotonic()` start vào dict per-session (keyed `tool_use_id`) để PostToolUse/Failure pop ra tính `duration_ms`. Gỡ stream-loop `tool_calls`/`_PendingCall`/`_close_call` + dispatcher `for tc in tool_calls` loop (tránh double-log). `BrainResult.tool_calls: list` → `tool_use_count: int` (footer cosmetic, đếm `ToolUseBlock` trong stream). File: [sdk/hooks.py](src/agentic/sdk/hooks.py) (mới), [sdk/brain_session.py](src/agentic/sdk/brain_session.py), [dispatcher.py](src/agentic/dispatcher.py), [tests/test_dispatcher.py](tests/test_dispatcher.py). Contract §12.J.
+- **2026-05-30** — Phase 4 — Observability persist = thêm cột nullable vào `runs` (không bảng riêng). Vấn đề: `runs` thiếu cột token/cost; `BrainResult.usage`/`cost_usd` đang chỉ `log.info` ra stdout, không vào DB → không query được dashboard §9. Quyết định: `_RUNS_ADDED_COLUMNS` migration loop mới trong `init_db` (mirror `_THREAD_ADDED_COLUMNS`): `cache_read_input_tokens / cache_creation_input_tokens / input_tokens / output_tokens / cost_usd / num_turns`. Chỉ brain row fill (từ `ResultMessage.usage`); tool row để null. `log_run` thêm optional `usage`/`cost_usd`/`num_turns`. Dashboard query thuần SQL, không join. Contract §12.K.
+- **2026-05-30** — Phase 4 — summarizer.py defer xoá sang Phase 5. Vấn đề: §3 Phase 4 ghi "Bỏ summarizer.py" nhưng `decide()` legacy đọc `threads.summary`; xoá sẽ break rollback `AGENTIC_USE_SDK=false` (§5 invariant). SDK path **đã** không summarize (early-return [dispatcher.py:737](src/agentic/dispatcher.py#L737) trước `maybe_schedule_summary` line 1026) → Phase 4 không còn việc functional. Quyết định: giữ summarizer.py + import + callsite cho legacy; Phase 4 chỉ document SDK dùng compaction native. Xoá vật lý ở Phase 5 cùng `brain.py`. Mirror quyết định brain.md/brain_sdk.md 2026-05-30.
+- **2026-05-30** — Phase 4 — PreCompact = log-only, không Slack notify. Vấn đề: §4 #6 + §3 mô tả "cảnh báo session sắp full" nhưng PreCompact fire *khi compaction đang xảy ra*, không phải dự báo trước — SDK không có hook "almost full" (muốn dự báo phải poll `get_context_usage`). Quyết định: hook chỉ `log.warning(trigger=...)`; bỏ framing "sắp full". Streaming refinement Phase 4 = xử lý `chat_update` 429/Retry-After + đảm bảo final-flush (debounce 1.5s đã xong Phase 2); không thêm tool-progress marker (giảm rate-limit risk).
+- **2026-05-30** — Audit fix — `CONFIRM_TOOLS` thực sự populate. Bug: §12.I bước 1 nói Phase 2 set `{github_merge_pr, github_approve_pr}` nhưng [permission.py](src/agentic/sdk/permission.py) để rỗng → `can_use_tool` auto-Allow mọi tool → SDK path **merge/approve PR không hỏi user**; `approve_pr` không có cả server-side guard ([github.py:59-70](src/agentic/integrations/github.py#L59)) nên approve hoàn toàn tự động. Fix: `CONFIRM_TOOLS = {"github_merge_pr", "github_approve_pr"}` (bare); `_needs_confirm` strip prefix `mcp__<server>__` để match cả tên canonical control-protocol gửi (`mcp__agentic__github_merge_pr`) lẫn bare. Test `test_phase1_whitelists_empty` → `test_confirm_tools_gate_destructive_pr_ops`.
+- **2026-05-30** — Audit fix — Brain session set `cwd` + `add_dirs`. Bug: [brain_session.py](src/agentic/sdk/brain_session.py) factory không set `cwd`/`add_dirs` → session chạy ở cwd process bot (chính repo bot), không phải worktree ticket; `_workspace_brain_hint` (SDK path) lại không chứa absolute worktree path (chỉ `_workspace_context_block` legacy có) → dev sub-agent (tools Read/Write/Edit/Bash, no MCP) không biết edit ở đâu → pain point #4 chưa thực fix. Fix: `_session_dirs(row)` → cwd = `active_worktree` nếu tồn tại on-disk, else `workspace_dir`; `add_dirs` = dedupe(`workspace_dir`, `worktree_dir`, active worktree). Session cwd vẫn lock tại open (per §8 2026-05-29) nên `_workspace_brain_hint` thêm dòng worktree path + dặn brain chuyển path cho dev (cover case worktree tạo mid-thread). File: [brain_session.py](src/agentic/sdk/brain_session.py), [dispatcher.py:_workspace_brain_hint](src/agentic/dispatcher.py).
+- **2026-05-30** — Phase 5 — `load_prompt` giữ trong `agents/base.py`, package thành namespace (xoá `__init__.py`). Vấn đề: §3 yêu cầu xoá `agents/__init__.py`+REGISTRY+dev.py nhưng `load_prompt` (dùng bởi brain_session + sub_agents) sống trong `agents/base.py`. Quyết định: strip `base.py` còn mỗi `load_prompt`; xoá `__init__.py` → `agentic.agents` thành PEP420 namespace package (hatch `packages=["src/agentic"]` copy nguyên cây nên import `from ..agents.base import load_prompt` vẫn chạy; verified pytest). Không relocate `load_prompt` sang module mới để giảm churn import. `claude_runtime_dir`/`claude_timeout`/`brain_model` thành dead config nhưng giữ (env knob vô hại, không xoá để khỏi mở scope).
+- **2026-05-30** — Phase 5 — dispatcher slim còn ~290 LoC (< 700 target). Giữ: `_resolve_active_workspace` + deps (`_ticket_from_context`, `_service_slug_from_registry{,_text}`, `_TICKET_RE`), `_workspace_brain_hint`, `_truncate`, footer, SDK singletons. Xoá toàn bộ ReAct loop + `_run_action`/`_invoke_integration`/retry + `_synthesize_action_reply` + `_run_{review,fix}_after_pr_diff` + `_dev_cwd_from_context`/`_dev_context_for_step`/`_workspace_context_block` + `_shrink_reply`/`_shrink_dev_reply` + `_is_*` intent matchers + `_format_action_result`/`_USER_FRIENDLY_ERROR_MESSAGES` + `_repo_from_*`. `add_message(assistant)` giữ cho `recent_messages` fallback; bỏ `last_agent`/summary. Tests legacy xoá (parse_decision, ReAct, dev_cwd, synthesize, has_log_output); 56→43 hermetic pass.
+- **2026-05-30** — Phase 5 — Xoá progress-message loop (race với streaming). Bug: [slack_handlers.py](src/agentic/slack_handlers.py) set `Job.progress` edit **cùng** `placeholder_ts` mà SDK stream (`_safe_placeholder_update`) đang ghi → worker `_progress_loop` post "⏳ Đang xử lý..." mỗi 5–10s ghi đè text đang stream → flicker. Pre-existing từ Phase 4 streaming, giờ luôn active (SDK-only). Quyết định: streamed text **là** progress indicator → xoá `Job.progress`/`progress_messages`, `JobRunner._progress_loop` + wiring, `slack_handlers.progress` closure + `_progress_messages_for`, `handle_message(progress=...)` param + `ReplyFn` import. Giữ `_placeholder_for` (text placeholder ban đầu). File: [worker.py](src/agentic/worker.py), [slack_handlers.py](src/agentic/slack_handlers.py), [dispatcher.py](src/agentic/dispatcher.py), [tests/test_slack_handlers.py](tests/test_slack_handlers.py).
 
 ---
 
@@ -698,6 +716,67 @@ Machinery Phase 1 đã ship (`PendingPermissions`, `build_slack_permission_callb
 5. **Legacy `pending_confirmations` SQLite table**: giữ tới Phase 5 (per câu #2 chốt). Path SDK dùng in-memory `PendingPermissions` only. Hai cơ chế chạy song song theo `settings.use_sdk`; không cross-contamination vì SDK path không gọi `_is_affirmative`/`_run_pending`.
 
 6. **Text-reply edge case**: §12.A đã chốt — user reply text thay vì bấm button → text rơi vào brain (path bình thường), pending Future tiếp tục chờ button/timeout 5'. Phase 2 KHÔNG bịa text-parse cho confirm.
+
+### 12.J — Hooks (Phase 4)
+
+`HookMatcher(matcher, hooks: list[HookCallback], timeout)`; `HookCallback = (input: HookInput, tool_use_id: str|None, ctx: HookContext) -> Awaitable[HookJSONOutput]`. **`HookInput` là TypedDict** → dict access (`input["tool_name"]`), không attribute. No-op trả `{}`.
+
+Hook factory dựng trong `make_brain_options_factory` — closure có `thread_ts` + `row["channel"]` đủ context cho `log_run`. Session cache per-thread → hook bind đúng thread lúc session-open. `starts` dict (tool_use_id → monotonic) sống theo session (1 dict/closure), pop khi tool xong.
+
+```python
+# src/agentic/sdk/hooks.py
+def build_brain_hooks(*, thread_ts: str, channel: str) -> dict[HookEvent, list[HookMatcher]]:
+    starts: dict[str, float] = {}   # tool_use_id → monotonic start (per session)
+
+    async def pre_tool(inp, tool_use_id, ctx):          # PreToolUse — chỉ stamp start
+        tid = inp.get("tool_use_id") or tool_use_id
+        if tid: starts[tid] = time.monotonic()
+        return {}
+
+    async def post_tool(inp, tool_use_id, ctx):         # PostToolUse  (success)
+        _log_tool(inp, tool_use_id, starts, thread_ts, channel, ok=True, err=None)
+        return {}
+
+    async def post_tool_fail(inp, tool_use_id, ctx):    # PostToolUseFailure
+        _log_tool(inp, tool_use_id, starts, thread_ts, channel,
+                  ok=False, err=(inp.get("error") or "tool_error")[:500])
+        return {}
+
+    async def pre_compact(inp, tool_use_id, ctx):       # PreCompact — log-only
+        log.warning("sdk compaction thread=%s trigger=%s", thread_ts, inp.get("trigger"))
+        return {}
+
+    return {
+        "PreToolUse":         [HookMatcher(hooks=[pre_tool])],
+        "PostToolUse":        [HookMatcher(hooks=[post_tool])],
+        "PostToolUseFailure": [HookMatcher(hooks=[post_tool_fail])],
+        "PreCompact":         [HookMatcher(hooks=[pre_compact])],
+    }
+```
+
+`_log_tool` pop start → `duration_ms`, redact secret trong `tool_input` preview (regex `ghp_`/`xox?-`/`x-access-token:`/`//user:pass@`) **chỉ trên text ghi log**, KHÔNG mutate `updatedInput` (không can thiệp execution), rồi `log_run(agent=tool_name, status=ok/error, duration_ms, error)`. `user_id` để None (factory không có — user vary per turn).
+
+**Wire**: `make_brain_options_factory` đổi `hooks={}` → `hooks=build_brain_hooks(thread_ts=thread_ts, channel=row.get("channel"))`. Gỡ stream-loop tool collection (brain_session) + dispatcher tool loop.
+
+### 12.K — Observability schema (Phase 4)
+
+`runs` thêm 6 cột nullable qua `_RUNS_ADDED_COLUMNS` (migration loop mới trong `init_db`, mirror `_THREAD_ADDED_COLUMNS`):
+
+| cột | nguồn |
+|---|---|
+| `cache_read_input_tokens` INTEGER | `ResultMessage.usage["cache_read_input_tokens"]` |
+| `cache_creation_input_tokens` INTEGER | `usage["cache_creation_input_tokens"]` |
+| `input_tokens` INTEGER | `usage["input_tokens"]` |
+| `output_tokens` INTEGER | `usage["output_tokens"]` |
+| `cost_usd` REAL | `ResultMessage.total_cost_usd` |
+| `num_turns` INTEGER | `ResultMessage.num_turns` |
+
+Chỉ **brain row** fill (dispatcher truyền `usage=`/`cost_usd=`/`num_turns=` vào `log_run`); tool row (hook) để null. `log_run` thêm optional kwargs `usage: dict|None`, `cost_usd: float|None`, `num_turns: int|None`; derive 4 cột token từ `usage`.
+
+Dashboard query (thuần SQL, không join):
+- **cache_read ratio** (brain): `SUM(cache_read_input_tokens)*1.0 / NULLIF(SUM(cache_read_input_tokens + cache_creation_input_tokens),0) WHERE agent='brain'`.
+- **cost/thread**: `SELECT thread_ts, SUM(cost_usd) FROM runs WHERE cost_usd IS NOT NULL GROUP BY thread_ts`.
+- **tool fail rate**: `SUM(status='error')*1.0/COUNT(*) FROM runs WHERE agent LIKE '%\_%' ESCAPE '\'` (tool rows = snake_case `<integration>_<verb>`; brain/po/ba/review/dev không có `_`).
 
 ---
 
