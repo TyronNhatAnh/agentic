@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # resolved by the CLI to its current version of each family.
     brain_model: str = Field(default="opus", alias="BRAIN_MODEL")
     dev_model: str = Field(default="opus", alias="DEV_MODEL")
-    agent_model: str = Field(default="sonnet", alias="AGENT_MODEL")
+    agent_model: str = Field(default="opus", alias="AGENT_MODEL")
     claude_runtime_dir: str = Field(
         default="/tmp/agentic-runtime", alias="CLAUDE_RUNTIME_DIR"
     )

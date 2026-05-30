@@ -85,6 +85,10 @@ def make_brain_options_factory(
         return ClaudeAgentOptions(
             system_prompt=system_prompt,
             mcp_servers={"agentic": server},
+            # Pin the brain model explicitly (was unset → ran on the CLI default).
+            # Default Opus for reasoning quality; tunable via BRAIN_MODEL if cost
+            # matters more than depth on a given deployment.
+            model=settings.brain_model,
             permission_mode="default",
             # The brain runs with the full default tool palette (incl. Bash — that's
             # how it does `go build`/git/gh; the dev sub-agent can't get Bash from

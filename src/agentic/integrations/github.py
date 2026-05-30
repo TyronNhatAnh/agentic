@@ -56,6 +56,45 @@ async def comment_pr(pr: int, body: str, repo: str | None = None) -> str:
         return f"✅ Đã comment vào PR #{pr} `{repo}`: <{r.json()['html_url']}|xem comment>"
 
 
+async def add_assignees(
+    pr: int, assignees: list[str], repo: str | None = None
+) -> ToolResult:
+    """Assign users to a PR/issue (PR numbers share the issues API). GitHub
+    SILENTLY drops assignees that lack repo access (no error) — we diff requested
+    vs actual so the brain reports a real outcome instead of guessing."""
+    repo = _repo(repo)
+    wanted = [a.lstrip("@").strip() for a in (assignees or []) if a and a.strip()]
+    if not wanted:
+        return ToolResult.failure("VALIDATION", "Cần ít nhất 1 assignee.")
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{API}/repos/{repo}/issues/{pr}/assignees",
+            headers=_headers(),
+            json={"assignees": wanted},
+        )
+        if r.status_code == 404:
+            return ToolResult.failure(
+                "NOT_FOUND", f"Không thấy PR/issue #{pr} trong `{repo}`."
+            )
+        r.raise_for_status()
+        got = {a.get("login", "").lower() for a in (r.json().get("assignees") or [])}
+    added = [w for w in wanted if w.lower() in got]
+    missed = [w for w in wanted if w.lower() not in got]
+    if not added:
+        return ToolResult.failure(
+            "VALIDATION",
+            f"Không assign được {', '.join('@'+w for w in wanted)} cho PR #{pr} "
+            f"`{repo}` — user phải là collaborator/có push trên repo. Assign tay trên UI.",
+        )
+    msg = f"✅ Đã assign {', '.join('@'+a for a in added)} cho PR #{pr} `{repo}`."
+    if missed:
+        msg += (
+            f" ⚠️ Bỏ qua {', '.join('@'+m for m in missed)} "
+            "(không có quyền trên repo — cần add collaborator trước)."
+        )
+    return ToolResult.success(msg)
+
+
 async def approve_pr(
     pr: int, repo: str | None = None, body: str = "", confirmed: bool = False
 ) -> ToolResult:
@@ -426,6 +465,7 @@ ACTION_HANDLERS = {
                                                    p.get("body", ""), p.get("repo"),
                                                    bool(p.get("draft", False))),
     "github.comment_pr":       lambda p: comment_pr(p["pr"], p["body"], p.get("repo")),
+    "github.add_assignees":    lambda p: add_assignees(p["pr"], p["assignees"], p.get("repo")),
     "github.approve_pr":       lambda p: approve_pr(p["pr"], p.get("repo"), p.get("body", ""),
                                                     bool(p.get("confirmed", False))),
     "github.merge_pr":         lambda p: merge_pr(p["pr"], p.get("repo"),

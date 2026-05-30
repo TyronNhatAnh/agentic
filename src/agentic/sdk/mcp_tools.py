@@ -170,6 +170,34 @@ async def github_comment_pr(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "github_add_assignees",
+    "Assign one or more GitHub users to a PR (or issue). Users must be repo "
+    "collaborators; ones without access are reported as skipped. Use this instead "
+    "of shell `gh` — it calls the REST API directly (no quoting pitfalls).",
+    {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "assignees": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "GitHub logins, with or without leading @.",
+            },
+            "repo": {"type": "string"},
+        },
+        "required": ["pr", "assignees"],
+    },
+)
+async def github_add_assignees(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: github_int.add_assignees(
+            args["pr"], args["assignees"], args.get("repo")
+        ),
+        retryable_read=False, service="GitHub",
+    )
+
+
+@tool(
     "github_approve_pr",
     "Submit an APPROVE review on a pull request. User confirmation is handled by the permission callback — do not ask twice.",
     {
@@ -535,6 +563,30 @@ async def jira_comment_issue(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "jira_assign_issue",
+    "Assign a Jira issue to a user. Omit `assignee` (or pass 'me') to assign to "
+    "the bot's own Jira account; otherwise pass an email or display name. Needed "
+    "before transitions that require an assignee (e.g. Code Review).",
+    {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string"},
+            "assignee": {
+                "type": "string",
+                "description": "Email/display name; empty or 'me' = the API-token user.",
+            },
+        },
+        "required": ["key"],
+    },
+)
+async def jira_assign_issue(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.assign_issue(args["key"], args.get("assignee")),
+        retryable_read=False, service="Jira",
+    )
+
+
+@tool(
     "jira_list_transitions",
     "List available workflow transitions for a Jira issue.",
     {
@@ -776,16 +828,17 @@ async def ship_create_pr(args: dict[str, Any]) -> dict[str, Any]:
 # ============================================================================
 
 _ALL_TOOLS = [
-    # github (13)
+    # github (14)
     github_create_issue, github_create_pr, github_comment_pr,
+    github_add_assignees,
     github_approve_pr, github_merge_pr, github_update_pr,
     github_list_my_prs, github_list_prs, github_list_issues,
     github_list_notifications, github_search,
     github_get_pr, github_get_pr_diff,
-    # jira (10)
+    # jira (11)
     jira_list_my_issues, jira_list_my_in_progress, jira_list_my_sprint,
     jira_list_project_in_progress, jira_get_issue, jira_search,
-    jira_create_issue, jira_comment_issue,
+    jira_create_issue, jira_comment_issue, jira_assign_issue,
     jira_list_transitions, jira_transition_issue,
     # git (5)
     git_check_repo, git_prepare_workspace, git_prepare_pr_review_workspace,

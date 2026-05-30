@@ -196,6 +196,9 @@ async def test_brain_options_factory_wires_subagents():
     opts = await factory(thread_ts)
     assert set(opts.agents.keys()) == {"po", "ba", "review", "dev"}
     assert opts.permission_mode == "default"
+    # Brain model must be wired (was dead config before) so it doesn't silently
+    # run on the expensive CLI-default Opus.
+    assert opts.model, "brain options must set model (BRAIN_MODEL)"
     assert "agentic" in opts.mcp_servers
     # Brain runs with full default Bash; deny rules (evaluated before can_use_tool)
     # must block history-rewrite at the session level, not only on the dev agent.

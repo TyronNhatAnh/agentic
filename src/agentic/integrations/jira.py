@@ -243,6 +243,44 @@ async def transition_issue(key: str, target_status: str) -> ToolResult:
     return ToolResult.success(f"✅ <{_browse_url(key)}|{key}> → *{match['to']['name']}*")
 
 
+async def assign_issue(key: str, assignee: str | None = None) -> ToolResult:
+    """Assign a Jira issue (Jira Cloud assigns by accountId).
+
+    - assignee empty / "me" / "tôi" / "self" → current API-token user (``/myself``).
+    - otherwise → resolve by email or display name via user search (first match).
+    """
+    want = (assignee or "").strip().lower()
+    async with _client() as c:
+        if want in ("", "me", "tôi", "toi", "self", "mình", "minh", "myself"):
+            r = await c.get(f"{_base()}/rest/api/3/myself")
+            r.raise_for_status()
+            u = r.json()
+        else:
+            r = await c.get(f"{_base()}/rest/api/3/user/search", params={"query": assignee})
+            r.raise_for_status()
+            users = r.json() or []
+            if not users:
+                return ToolResult.failure(
+                    "NOT_FOUND", f"Không tìm thấy Jira user khớp `{assignee}`."
+                )
+            u = users[0]
+        account_id = u.get("accountId")
+        who = u.get("displayName") or assignee or "bạn"
+        r = await c.put(
+            f"{_base()}/rest/api/3/issue/{key}/assignee",
+            json={"accountId": account_id},
+        )
+        if r.status_code not in (200, 204):
+            try:
+                detail = (r.json() or {}).get("errorMessages") or r.text
+            except Exception:
+                detail = r.text
+            return ToolResult.failure(
+                "VALIDATION", f"Jira từ chối assign {key}: {str(detail)[:200]}"
+            )
+    return ToolResult.success(f"✅ Đã assign <{_browse_url(key)}|{key}> cho *{who}*")
+
+
 async def comment_issue(key: str, body: str) -> ToolResult:
     async with _client() as c:
         r = await c.post(
@@ -266,6 +304,7 @@ ACTION_HANDLERS = {
     "jira.create_issue":              lambda p: create_issue(p["summary"], p.get("description", ""),
                                                              p.get("project"), p.get("issue_type", "Task")),
     "jira.comment_issue":             lambda p: comment_issue(p["key"], p["body"]),
+    "jira.assign_issue":              lambda p: assign_issue(p["key"], p.get("assignee")),
     "jira.list_transitions":          lambda p: list_transitions(p["key"]),
     "jira.transition_issue":          lambda p: transition_issue(p["key"], p["target_status"]),
 }

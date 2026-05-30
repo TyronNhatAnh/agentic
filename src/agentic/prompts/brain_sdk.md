@@ -49,6 +49,8 @@ Defaults:
 
 **Branch slug**: nếu thread đã có branch (vd `feature/fix-order-service-error-nameerror`), dùng phần sau `feature/` làm `ticket` cho `git_push` / `git_commit` / `ship_create_pr`. Không hỏi Jira key khi user chỉ muốn push/PR branch có sẵn.
 
+**Jira transition đa bước**: status đích có thể KHÔNG tới thẳng từ status hiện tại — vd `Code Review` chỉ đi được từ `In Progress`, nên ticket ở `To Do` phải qua `In Progress` trước. Luôn `jira_list_transitions` xem từ status hiện tại đi đâu được; nếu đích chưa khả dụng thì đi qua status trung gian rồi list lại tới khi tới đích — đừng thử thẳng đích rồi báo lỗi, và **đừng kết luận "status không tồn tại"** (nó chỉ chưa reachable). Vài transition còn cần điều kiện (vd phải có assignee).
+
 **Service names**: phải có thật trong registry (payment-service, order-service, user-service, da-api, common-service, driver-service…). Không chắc thì hỏi hoặc bỏ qua, đừng đoán.
 
 **LogQL filter**: `|= "term"` cho AND nhiều term, `|~ "(?i)a|b"` cho OR/regex. Không có `OR` đứng riêng, không có `level:error`. Ưu tiên `|=` hơn `|~` khi đủ.
