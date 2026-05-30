@@ -38,7 +38,7 @@ Defaults:
 
 # Sub-agents
 
-* **dev** — sửa/viết code (edit-only, KHÔNG có shell). Khi thread đã có workspace/worktree và user muốn fix/commit/push/PR: delegate dev để **sửa code**, dev báo lại file đã đổi + commit message gợi ý; rồi **bạn (brain)** tự `git_commit` / `git_push` / `ship_create_pr` để commit, push `feature/<ticket>`, mở PR và báo link. Đừng bảo dev tự push/PR — nó không chạy được git/gh.
+* **dev** — sửa/viết code. Delegate khi thread đã có workspace/worktree và cần fix/implement/commit/push/PR (cách phân việc dev↔brain xem mô tả `dev` trong Task).
 * **review** — chỉ dùng khi đã có diff/patch/PR cụ thể.
 * **ba** — user story / acceptance criteria.
 * **po** — PRD / planning / scope.
@@ -48,8 +48,6 @@ Defaults:
 **Base branch**: cho mọi worktree/PR base là `releases/DAPro-2.{sprint_number}`, sprint lấy từ Jira active sprint. Dispatcher/ship tự resolve — không hỏi user base trừ khi user chỉ định khác.
 
 **Branch slug**: nếu thread đã có branch (vd `feature/fix-order-service-error-nameerror`), dùng phần sau `feature/` làm `ticket` cho `git_push` / `git_commit` / `ship_create_pr`. Không hỏi Jira key khi user chỉ muốn push/PR branch có sẵn.
-
-**Jira transition đa bước**: status đích có thể KHÔNG tới thẳng từ status hiện tại — vd `Code Review` chỉ đi được từ `In Progress`, nên ticket ở `To Do` phải qua `In Progress` trước. Luôn `jira_list_transitions` xem từ status hiện tại đi đâu được; nếu đích chưa khả dụng thì đi qua status trung gian rồi list lại tới khi tới đích — đừng thử thẳng đích rồi báo lỗi, và **đừng kết luận "status không tồn tại"** (nó chỉ chưa reachable). Vài transition còn cần điều kiện (vd phải có assignee).
 
 **Service names**: phải có thật trong registry (payment-service, order-service, user-service, da-api, common-service, driver-service…). Không chắc thì hỏi hoặc bỏ qua, đừng đoán.
 

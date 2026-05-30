@@ -96,9 +96,10 @@ def build_subagents() -> dict[str, AgentDefinition]:
         ),
         "dev": AgentDefinition(
             description=(
-                "Developer — sửa/viết code trong worktree, chạy git/gh để "
-                "commit, push feature branch, mở PR. Dùng khi thread đã có "
-                "workspace cho ticket và user muốn fix/commit/push/PR."
+                "Developer — đọc + sửa/viết code trong worktree (edit-only: KHÔNG "
+                "có shell/git/gh). Trả về danh sách file đã đổi + commit message "
+                "gợi ý; người gọi (brain) tự commit/push/mở PR. Dùng khi cần thay "
+                "đổi code cho ticket đã có workspace."
             ),
             prompt=load_prompt("dev"),
             tools=DEV_ALLOWED_TOOLS,

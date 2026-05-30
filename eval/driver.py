@@ -119,6 +119,16 @@ SCENARIOS: dict[str, Scenario] = {
         ],
         expect="route po/ba (text-only), không gọi tool nào",
     ),
+    # Resolve — brain must map a loosely-named service to its exact owner/name via
+    # list_services, NOT guess the slug (the "thua luôn" case).
+    "resolve": Scenario(
+        id="resolve",
+        channel="C_EVAL",
+        turns=[
+            "Service order-service nằm ở GitHub repo nào (owner/name)? Trả đúng slug.",
+        ],
+        expect="brain gọi list_services → 'gogovan/ggx-kr-order-service', không đoán gogox/...",
+    ),
     # Probe — does the dev sub-agent actually get Bash? Forces delegation + a
     # single trivial Bash command. Cheap (1 short turn). If dev echoes the token,
     # bare "Bash" in dev.tools works; if it says no Bash, the grant is broken.
@@ -159,10 +169,8 @@ SCENARIOS: dict[str, Scenario] = {
         id="dev",
         channel="C_EVAL",
         turns=[
-            "Giao cho sub-agent `dev` (nó tự chạy git/gh qua Bash): trong service "
-            "{SVC}, thêm dòng '# eval smoke {STAMP}' vào cuối README, rồi dev tự "
-            "commit + push feature branch + mở PR bằng Bash (git/gh), báo lại link "
-            "PR. Ticket EVAL-3.",
+            "Trong service {SVC}, thêm dòng '# eval smoke {STAMP}' vào cuối README, "
+            "commit và mở PR giúp tôi. Ticket EVAL-4.",
         ],
         expect="dev resolve service từ registry → worktree → edit → commit → push → PR",
         side_effects=True,

@@ -31,6 +31,7 @@ from ..integrations import github as github_int
 from ..integrations import grafana as grafana_int
 from ..integrations import jira as jira_int
 from ..integrations import ship as ship_int
+from ..store import list_services as _list_services
 from ..integrations.result import ToolResult, classify_exception
 
 log = logging.getLogger(__name__)
@@ -626,6 +627,33 @@ async def jira_transition_issue(args: dict[str, Any]) -> dict[str, Any]:
 # ============================================================================
 
 @tool(
+    "list_services",
+    "List the registered service repos (name, github_repo `owner/name`, local "
+    "repo_path, aliases). Call this to resolve a service the user names loosely "
+    "(e.g. 'order', 'payment') to its exact `owner/name` BEFORE using github/git "
+    "tools — never guess the owner/repo slug.",
+    {"type": "object", "properties": {}, "required": []},
+)
+async def list_services(args: dict[str, Any]) -> dict[str, Any]:
+    import json as _json
+    rows = _list_services()
+    if not rows:
+        return _ok("(service registry rỗng)")
+    lines = []
+    for s in rows:
+        try:
+            aliases = _json.loads(s.get("aliases") or "[]")
+        except (ValueError, TypeError):
+            aliases = []
+        alias_s = f" (aliases: {', '.join(aliases)})" if aliases else ""
+        lines.append(
+            f"- {s.get('name')} → github: {s.get('github_repo')} · "
+            f"path: {s.get('repo_path')}{alias_s}"
+        )
+    return _ok(f"Service registry ({len(rows)}):\n" + "\n".join(lines))
+
+
+@tool(
     "git_check_repo",
     "Inspect a local service repo: current branch, uncommitted changes, remotes. Supply either service (from service_repos) or repo path.",
     {
@@ -840,6 +868,8 @@ _ALL_TOOLS = [
     jira_list_project_in_progress, jira_get_issue, jira_search,
     jira_create_issue, jira_comment_issue, jira_assign_issue,
     jira_list_transitions, jira_transition_issue,
+    # registry (1)
+    list_services,
     # git (5)
     git_check_repo, git_prepare_workspace, git_prepare_pr_review_workspace,
     git_commit, git_push,
