@@ -165,7 +165,16 @@ def test_build_subagents_dev_locked_down():
     assert ad.tools == DEV_ALLOWED_TOOLS
     assert ad.disallowedTools == DEV_DISALLOWED_TOOLS
     assert ad.permissionMode == "acceptEdits"
-    # Force-push / reset --hard must stay blocked.
+    # Dev is EDIT-ONLY: the SDK/CLI won't grant a sub-agent Bash (verified
+    # 2026-05-30), so dev edits in the worktree and the brain orchestrates
+    # git/build. No Bash, and never permission-rule syntax in `tools` (a bare-name
+    # allowlist — "Bash(git commit:*)" entries are silently ignored).
+    assert "Bash" not in ad.tools
+    assert not any("(" in t for t in ad.tools), (
+        "AgentDefinition.tools must be bare names, not Bash(...) permission rules"
+    )
+    # The history-rewrite deny list lives in disallowedTools (rule syntax is valid
+    # for deny rules); the brain carries the same list at the session level.
     assert "Bash(git push --force:*)" in ad.disallowedTools
     assert "Bash(git reset --hard:*)" in ad.disallowedTools
 
@@ -188,6 +197,10 @@ async def test_brain_options_factory_wires_subagents():
     assert set(opts.agents.keys()) == {"po", "ba", "review", "dev"}
     assert opts.permission_mode == "default"
     assert "agentic" in opts.mcp_servers
+    # Brain runs with full default Bash; deny rules (evaluated before can_use_tool)
+    # must block history-rewrite at the session level, not only on the dev agent.
+    assert "Bash(git push --force:*)" in opts.disallowed_tools
+    assert "Bash(git reset --hard:*)" in opts.disallowed_tools
     # Phase 4 — hooks wired for tool logging + compaction (§12.J).
     assert set(opts.hooks) == {
         "PreToolUse", "PostToolUse", "PostToolUseFailure", "PreCompact"

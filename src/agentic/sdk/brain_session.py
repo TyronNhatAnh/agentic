@@ -28,12 +28,19 @@ from .client_pool import ThreadSessionManager
 from .hooks import build_brain_hooks
 from .mcp_tools import build_agentic_mcp_server
 from .permission import PendingPermissions, build_slack_permission_callback
-from .sub_agents import build_subagents
+from .sub_agents import DEV_DISALLOWED_TOOLS, build_subagents
 
 log = logging.getLogger(__name__)
 
 # Slack chat.update is ~1/s/channel — 1.5s leaves headroom for long tails.
 _STREAM_EDIT_INTERVAL_S = 1.5
+# Appended to every *streaming* edit so a partial reply that sits still (brain is
+# mid-tool-call / still thinking) doesn't read as the finished answer. The worker
+# renders the final reply via a separate path (job.reply), so it never carries
+# this marker — its disappearance is the "done" signal. Added inside
+# _safe_placeholder_update (the only streaming-edit site) after truncation so it's
+# never clipped, and adds no extra chat.update calls (§8 2026-05-30 rate-limit guard).
+_STREAM_SUFFIX = "\n\n_⏳ đang xử lý…_"
 
 
 @dataclass
@@ -79,6 +86,13 @@ def make_brain_options_factory(
             system_prompt=system_prompt,
             mcp_servers={"agentic": server},
             permission_mode="default",
+            # The brain runs with the full default tool palette (incl. Bash — that's
+            # how it does `go build`/git/gh; the dev sub-agent can't get Bash from
+            # the SDK, so the brain orchestrates git/build itself). Deny rules are
+            # evaluated first and strip the tool from context entirely, closing the
+            # history-rewrite hole at the session level: force-push / reset --hard /
+            # clean are blocked for the brain too, not just the dev sub-agent.
+            disallowed_tools=DEV_DISALLOWED_TOOLS,
             can_use_tool=cb,
             agents=subagents,
             hooks=build_brain_hooks(thread_ts=thread_ts, channel=channel),
@@ -257,6 +271,7 @@ async def _safe_placeholder_update(
         return 0.0
     if len(snippet) > 3500:
         snippet = snippet[:3400] + "\n…"
+    snippet += _STREAM_SUFFIX
     try:
         await client.chat_update(channel=channel, ts=ts, text=snippet)
         return 0.0

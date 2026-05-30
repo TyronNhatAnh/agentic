@@ -17,26 +17,19 @@ from ..config import settings
 # Mirrors the legacy agents/dev.py allowlist plus the editor/search primitives
 # the SDK exposes natively. Kept verbatim so dev still finishes edit → commit
 # → push → open PR end-to-end inside a worktree.
+# Dev is EDIT-ONLY. We verified (2026-05-30) that the SDK/CLI does not grant Bash
+# to a sub-agent even when "Bash" is in `tools` AND in the session `allowed_tools`
+# (both documented mechanisms) — the dev sub-agent never gets Bash in its palette
+# (transcript shows it doesn't even attempt the call). So dev edits/inspects code
+# in the worktree and the BRAIN orchestrates git/build (its own Bash + the MCP
+# `git_*` / `ship_create_pr` tools). The old list also wrongly used permission-rule
+# syntax ("Bash(git commit:*)") here, which `tools` (a bare-name allowlist) ignores.
 DEV_ALLOWED_TOOLS: list[str] = [
     "Read",
     "Write",
     "Edit",
     "Glob",
     "Grep",
-    "Bash(git status:*)",
-    "Bash(git diff:*)",
-    "Bash(git log:*)",
-    "Bash(git add:*)",
-    "Bash(git commit:*)",
-    "Bash(git push:*)",
-    "Bash(git fetch:*)",
-    "Bash(git rev-parse:*)",
-    "Bash(git branch:*)",
-    "Bash(git checkout:*)",
-    "Bash(gh pr create:*)",
-    "Bash(gh pr view:*)",
-    "Bash(gh pr list:*)",
-    "Bash(gh pr comment:*)",
 ]
 
 # Safety boundary — never rewrite history or force-push.
@@ -50,15 +43,16 @@ DEV_DISALLOWED_TOOLS: list[str] = [
     "Bash(git branch -D:*)",
 ]
 
-# Review needs read access + git diff/log/show + the MCP tools that fetch PR
-# data. No write/push/comment — review reports, brain decides whether to act.
+# Review reads code + fetches PR data via MCP. It deliberately gets NO Bash:
+# `tools` is a bare-name allowlist, so the old "Bash(git diff:*)" entries granted
+# nothing anyway (rule syntax isn't a tool name); and bare "Bash" would be full
+# shell — a review agent must not be able to commit/push/mutate (best practice:
+# review reports, brain decides). Worktree cross-check is done by Read/Grep/Glob
+# on the files; the PR diff comes from the MCP github tools. No write/push/comment.
 REVIEW_ALLOWED_TOOLS: list[str] = [
     "Read",
     "Glob",
     "Grep",
-    "Bash(git diff:*)",
-    "Bash(git log:*)",
-    "Bash(git show:*)",
     "mcp__agentic__github_get_pr",
     "mcp__agentic__github_get_pr_diff",
 ]

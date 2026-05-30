@@ -110,7 +110,13 @@
       "Bash(rm -f /tmp/_stats_test.db*)",
       "Bash(git rm *)",
       "Bash(AGENTIC_DB=/tmp/_p5.db .venv/bin/python -c \"from agentic import store; store.settings.agentic_db='/tmp/_p5.db'; store._PRAGMAS_APPLIED=False; store.init_db\\(\\); print\\('init ok, pending_confirmations gone:', 'pending_confirmations' not in store.SCHEMA\\)\")",
-      "Bash(rm -f /tmp/_p5.db*)"
+      "Bash(rm -f /tmp/_p5.db*)",
+      "Bash([ -f \"$DB\" ])",
+      "Bash(ssh -T git@github.com)",
+      "Bash(curl -s -H 'Authorization: Bearer __TRACKED_VAR__' https://grafana-kr.gogo.tech/api/datasources)",
+      "Bash(curl -s -o /dev/null -w \"  root HTTP %{http_code}\\\\n\" \"https://grafana-kr.gogo.tech/api/health\")",
+      "Bash(curl -s \"https://grafana-kr.gogo.tech/api/health\")",
+      "Bash(curl -s -H \"Authorization: Bearer glsa_bogus\" \"https://grafana-kr.gogo.tech/api/datasources\")"
     ],
     "deny": [
       "Read(//Users/tyron/Projects/agentic/.env)",
