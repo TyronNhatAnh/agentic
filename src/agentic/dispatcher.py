@@ -15,6 +15,7 @@ import time
 
 from .config import settings
 from .integrations import git as git_int
+from .revamp_pipeline import run_revamp_pipeline
 from .sdk import (
     PendingPermissions,
     ThreadSessionManager,
@@ -145,6 +146,20 @@ def _service_slug_from_registry(text: str, messages: list[dict]) -> str | None:
     return None
 
 
+_REVAMP_CMD_RE = re.compile(r"^\s*revamp\s+(?P<scope>\S.*)$", re.IGNORECASE)
+
+
+def _revamp_scope(text: str, channel: str | None) -> str | None:
+    """Return the scope arg if this is a `revamp <scope>` command in the revamp
+    channel, else None. Gated on REVAMP_CHANNEL_ID so the command is inert
+    everywhere else (prod channels never trigger the pipeline)."""
+    rid = (settings.revamp_channel_id or "").strip()
+    if not rid or (channel or "").strip() != rid:
+        return None
+    m = _REVAMP_CMD_RE.match(text or "")
+    return m.group("scope").strip() if m else None
+
+
 _TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
 
 
@@ -219,6 +234,35 @@ async def handle_message(
 ) -> str:
     t_start = time.time()
     text, input_truncated = _truncate(text, settings.max_input_chars, label="input")
+
+    # Revamp pipeline: deterministic SCAN→ARCHAEOLOGY→SPEC→Notion, bypasses the
+    # brain session. Only fires for `revamp <scope>` in the revamp channel.
+    scope = _revamp_scope(text, channel)
+    if scope is not None:
+        if slack_client is None or not placeholder_ts:
+            raise RuntimeError("revamp pipeline requires slack_client + placeholder_ts")
+        if thread_ts:
+            touch_thread(thread_ts, channel)
+        reply = await run_revamp_pipeline(
+            scope=scope,
+            thread_ts=thread_ts or "",
+            channel=channel or "",
+            slack_client=slack_client,
+            placeholder_ts=placeholder_ts,
+        )
+        log_run(
+            agent="revamp",
+            input_text=text,
+            output=reply,
+            status="ok",
+            duration_ms=int((time.time() - t_start) * 1000),
+            thread_ts=thread_ts,
+            channel=channel,
+            user_id=user_id,
+        )
+        if thread_ts:
+            add_message(thread_ts, "assistant", reply)
+        return reply
 
     prior_messages: list[dict] = []
     thread_row: dict | None = None

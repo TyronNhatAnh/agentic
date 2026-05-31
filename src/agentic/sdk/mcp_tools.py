@@ -30,6 +30,7 @@ from ..integrations import git as git_int
 from ..integrations import github as github_int
 from ..integrations import grafana as grafana_int
 from ..integrations import jira as jira_int
+from ..integrations import notion as notion_int
 from ..integrations import ship as ship_int
 from ..store import list_services as _list_services
 from ..integrations.result import ToolResult, classify_exception
@@ -752,6 +753,34 @@ async def git_push(args: dict[str, Any]) -> dict[str, Any]:
 
 
 # ============================================================================
+# Notion (1)
+# ============================================================================
+
+@tool(
+    "notion_create_page",
+    "Create a Notion page (markdown body) under a parent page. Use to publish "
+    "revamp design docs / analysis. `parent` defaults to NOTION_PARENT_PAGE_ID. "
+    "Write tool — no retry.",
+    {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "markdown": {"type": "string", "description": "page body in markdown"},
+            "parent": {"type": "string", "description": "Notion parent page id; defaults to NOTION_PARENT_PAGE_ID"},
+        },
+        "required": ["title"],
+    },
+)
+async def notion_create_page(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: notion_int.create_page(
+            args["title"], args.get("markdown", ""), args.get("parent"),
+        ),
+        retryable_read=False, service="Notion",
+    )
+
+
+# ============================================================================
 # Grafana (2)
 # ============================================================================
 
@@ -873,6 +902,8 @@ _ALL_TOOLS = [
     # git (5)
     git_check_repo, git_prepare_workspace, git_prepare_pr_review_workspace,
     git_commit, git_push,
+    # notion (1)
+    notion_create_page,
     # grafana (2)
     grafana_search_logs, grafana_list_datasources,
     # ship (1)

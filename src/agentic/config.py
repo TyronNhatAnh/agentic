@@ -39,6 +39,29 @@ class Settings(BaseSettings):
     jira_default_project: str = Field(default="", alias="JIRA_DEFAULT_PROJECT")
     jira_board_id: int = Field(default=0, alias="JIRA_BOARD_ID")
 
+    # Notion (revamp docs sink). Empty token disables the notion_create_page tool
+    # and the revamp pipeline's Notion writes (pipeline reports the missing config
+    # instead of failing mid-run).
+    notion_token: str = Field(default="", alias="NOTION_TOKEN")
+    # Reuses the existing NOTION_PAGE_ID from .env.example as the parent page the
+    # revamp pipeline nests module/spec pages under.
+    notion_parent_page_id: str = Field(default="", alias="NOTION_PAGE_ID")
+    notion_version: str = Field(default="2022-06-28", alias="NOTION_VERSION")
+
+    # da-api revamp tier. The bot tells prod-ops apart from revamp by Slack channel
+    # ID (resolve_policy in policy.py). Legacy repo is the read-only Ruby source the
+    # archaeologist analyses; it must be a path the SDK can read (added to add_dirs).
+    revamp_channel_id: str = Field(default="", alias="REVAMP_CHANNEL_ID")
+    revamp_legacy_repo: str = Field(default="", alias="REVAMP_LEGACY_REPO")
+    # Service name (in the registry) of the rewrite target repo for the revamp
+    # project — where impl/PR work will land once that phase starts. Recorded now
+    # so the binding is explicit; hard per-repo scope enforcement is a later phase.
+    revamp_target_service: str = Field(default="", alias="REVAMP_TARGET_SERVICE")
+    # Hard cap on modules analysed per `revamp <scope>` run — a backstop so a broad
+    # scope can't fan out into hundreds of archaeologist calls. The pipeline logs
+    # when it truncates rather than silently dropping modules.
+    revamp_module_cap: int = Field(default=40, alias="REVAMP_MODULE_CAP")
+
     workspace_dir: str = Field(default="", alias="WORKSPACE_DIR")
     worktree_dir: str = Field(default="", alias="WORKTREE_DIR")
     services_seed_path: str = Field(default="", alias="AGENTIC_SERVICES_JSON")

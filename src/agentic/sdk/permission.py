@@ -91,20 +91,35 @@ def build_slack_permission_callback(
     channel_id: str,
     thread_ts: str,
     timeout_s: int = 300,
+    tool_scope: frozenset[str] | None = None,
 ):
     """Return a CanUseTool async callback bound to a single Slack thread.
 
     Behavior:
+      - `tool_scope` set and tool outside it → Deny immediately (channel policy,
+        see policy.py). None = no gate (prod default, every tool allowed).
       - Tool not in confirm whitelist → Allow immediately (passthrough).
       - Tool needs confirm → post Slack block-kit buttons with action_id
         `perm_allow` / `perm_deny`, create a pending Future, await it.
       - Timeout → Deny.
+
+    `allowed_tools` in the brain options is empty, so this callback fires for
+    every tool — that's what lets the scope gate cover builtins (Read/Bash/…) too.
     """
     async def cb(
         tool_name: str,
         tool_input: dict[str, Any],
         ctx: ToolPermissionContext,
     ):
+        # MCP tools arrive as `mcp__agentic__<name>`; match the bare suffix so the
+        # scope set (bare names) covers both MCP and builtin tools.
+        bare = tool_name.rsplit("__", 1)[-1]
+        if tool_scope is not None and tool_name not in tool_scope and bare not in tool_scope:
+            return PermissionResultDeny(
+                behavior="deny",
+                message=f"`{bare}` ngoài scope của channel này (policy revamp: read-only + Notion)",
+            )
+
         if not _needs_confirm(tool_name, tool_input):
             return PermissionResultAllow(behavior="allow", updated_input=tool_input)
 

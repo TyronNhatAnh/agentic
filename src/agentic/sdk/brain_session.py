@@ -23,6 +23,7 @@ from claude_agent_sdk import (
 
 from ..agents.base import load_prompt
 from ..config import settings
+from ..policy import WorkspacePolicy, resolve_policy
 from ..store import get_thread, update_thread_fields
 from .client_pool import ThreadSessionManager
 from .hooks import build_brain_hooks
@@ -67,7 +68,16 @@ def make_brain_options_factory(
     resume token per thread on first session open. `allowed_tools` empty so
     `can_use_tool` actually fires for CONFIRM_TOOLS (§8 2026-05-29)."""
     server = mcp_server or build_agentic_mcp_server()
-    system_prompt = load_prompt("brain_sdk")
+    # Prompts for every policy loaded once at startup so the per-channel system
+    # prompt is pinned into the prefix cache (channel is fixed per thread, so each
+    # session still has a stable prefix). prod=brain_sdk, revamp=brain_revamp.
+    prompt_cache: dict[str, str] = {}
+
+    def _prompt(name: str) -> str:
+        if name not in prompt_cache:
+            prompt_cache[name] = load_prompt(name)
+        return prompt_cache[name]
+
     # Built once at startup; prompt strings + tool lists are pinned into the
     # session prefix so AgentDefinition changes don't churn the cache.
     subagents = build_subagents()
@@ -75,15 +85,22 @@ def make_brain_options_factory(
     async def factory(thread_ts: str) -> ClaudeAgentOptions:
         row = get_thread(thread_ts) or {}
         channel = (row.get("channel") or "").strip()
-        cwd, add_dirs = _session_dirs(row)
+        policy = resolve_policy(channel)
+        cwd, add_dirs = _session_dirs(row, policy)
         cb = build_slack_permission_callback(
             pending=pending,
             slack_client=slack_client,
             channel_id=channel,
             thread_ts=thread_ts,
+            tool_scope=policy.tool_scope,
+        )
+        agents = (
+            subagents
+            if policy.subagents is None
+            else {k: v for k, v in subagents.items() if k in policy.subagents}
         )
         return ClaudeAgentOptions(
-            system_prompt=system_prompt,
+            system_prompt=_prompt(policy.system_prompt),
             mcp_servers={"agentic": server},
             # Pin the brain model explicitly (was unset → ran on the CLI default).
             # Default Opus for reasoning quality; tunable via BRAIN_MODEL if cost
@@ -98,7 +115,7 @@ def make_brain_options_factory(
             # clean are blocked for the brain too, not just the dev sub-agent.
             disallowed_tools=DEV_DISALLOWED_TOOLS,
             can_use_tool=cb,
-            agents=subagents,
+            agents=agents,
             hooks=build_brain_hooks(thread_ts=thread_ts, channel=channel),
             resume=row.get("sdk_session_id") or None,
             session_store=session_store,
@@ -109,7 +126,7 @@ def make_brain_options_factory(
     return factory
 
 
-def _session_dirs(row: dict) -> tuple[str | None, list[str]]:
+def _session_dirs(row: dict, policy: WorkspacePolicy) -> tuple[str | None, list[str]]:
     """Resolve the session cwd + writable roots for the dev sub-agent.
 
     The session cwd is locked at session-open (ThreadSessionManager caches the
@@ -118,13 +135,21 @@ def _session_dirs(row: dict) -> tuple[str | None, list[str]]:
     else the shared workspace dir, and (b) add both the workspace and worktree
     roots to ``add_dirs`` so dev edits land under acceptEdits even when the
     worktree was created after the session opened — the per-turn worktree path
-    still rides in on the workspace hint (§8 2026-05-29)."""
+    still rides in on the workspace hint (§8 2026-05-29).
+
+    ``policy.repo_roots`` adds tier-specific readable roots — e.g. the revamp
+    channel gets the legacy da-api repo so Read/Glob/Grep can reach it."""
     roots = [d for d in (settings.workspace_dir, settings.worktree_dir) if d]
+    roots.extend(r for r in policy.repo_roots if r)
     worktree = (row.get("active_worktree") or "").strip()
     if worktree and os.path.isdir(worktree):
         cwd: str | None = worktree
         if worktree not in roots:
             roots.append(worktree)
+    elif policy.repo_roots and os.path.isdir(policy.repo_roots[0]):
+        # Tier with its own repo (revamp → legacy da-api): open the session inside
+        # it so Read/Glob/Grep operate on the legacy source by default.
+        cwd = policy.repo_roots[0]
     else:
         cwd = settings.workspace_dir or None
     # Preserve order, drop dups.
