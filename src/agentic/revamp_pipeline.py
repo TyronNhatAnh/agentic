@@ -28,7 +28,13 @@ from claude_agent_sdk import (
 from .agents.base import load_prompt
 from .config import settings
 from .integrations import notion as notion_int
-from .store import get_revamp_module, list_revamp_modules, upsert_revamp_module
+from .store import (
+    get_revamp_module,
+    get_revamp_run,
+    list_revamp_modules,
+    upsert_revamp_module,
+    upsert_revamp_run,
+)
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +117,30 @@ def _scan_modules(legacy_repo: str, scope: str) -> tuple[list[str], int]:
     return units[:cap], dropped
 
 
+async def _resolve_index_page(run_key: str, scope: str) -> tuple[str, str]:
+    """Return (index_page_id, index_url) for this run, creating the index page on
+    first run and reusing it on reruns so module pages keep nesting under it."""
+    existing = get_revamp_run(run_key)
+    if existing and existing.get("index_page_id"):
+        return existing["index_page_id"], existing.get("index_url") or ""
+    page = await notion_int.create_page(
+        title=f"[revamp {scope}] INDEX",
+        markdown=(
+            f"Phân tích revamp cho scope `{scope}`.\n\n"
+            "Các trang con bên dưới: 1 trang/module + 1 trang SPRINT SPEC. "
+            "Trang này tự cập nhật danh sách con khi pipeline chạy thêm."
+        ),
+    )
+    if not page.ok:
+        raise RuntimeError(page.user_message or "tạo INDEX thất bại")
+    index_id = (page.data or {}).get("id", "")
+    index_url = (page.data or {}).get("url", "")
+    if not index_id:
+        raise RuntimeError("Notion không trả page id cho INDEX")
+    upsert_revamp_run(run_key, index_id, index_url)
+    return index_id, index_url
+
+
 async def _progress(slack_client: Any, channel: str, ts: str, text: str) -> None:
     if not (slack_client and channel and ts):
         return
@@ -148,6 +178,15 @@ async def run_revamp_pipeline(
         return f"❌ Không tìm thấy module nào dưới scope `{scope}`."
 
     run_key = scope
+
+    # Index page — module/spec pages nest under it so Notion shows one tidy tree
+    # instead of N flat siblings. Reused across reruns of the same scope.
+    try:
+        index_id, index_url = await _resolve_index_page(run_key, scope)
+    except Exception as e:  # noqa: BLE001
+        log.exception("revamp index page failed scope=%s", scope)
+        return f"❌ Không tạo được trang INDEX trên Notion: {e}"
+
     archaeologist_prompt = load_prompt("archaeologist")
     total = len(modules)
     fresh_docs: list[tuple[str, str]] = []  # (module, markdown) for SPEC input
@@ -178,7 +217,8 @@ async def run_revamp_pipeline(
             if not markdown:
                 raise RuntimeError("archaeologist trả về rỗng")
             page = await notion_int.create_page(
-                title=f"[revamp {scope}] {module}", markdown=markdown
+                title=f"[revamp {scope}] {module}", markdown=markdown,
+                parent_id=index_id,
             )
             url = (page.data or {}).get("url", "") if page.ok else ""
             page_id = (page.data or {}).get("id", "") if page.ok else ""
@@ -218,24 +258,27 @@ async def run_revamp_pipeline(
             )
             if spec_md:
                 spec_page = await notion_int.create_page(
-                    title=f"[revamp {scope}] SPRINT SPEC", markdown=spec_md
+                    title=f"[revamp {scope}] SPRINT SPEC", markdown=spec_md,
+                    parent_id=index_id,
                 )
                 spec_url = (spec_page.data or {}).get("url", "") if spec_page.ok else ""
         except Exception as e:  # noqa: BLE001
             log.exception("revamp spec synthesis failed")
             spec_url = f"(SPEC lỗi: {e})"
 
-    return _render_summary(scope, results, dropped, spec_url)
+    return _render_summary(scope, results, dropped, spec_url, index_url)
 
 
 def _render_summary(
-    scope: str, results: list[dict], dropped: int, spec_url: str
+    scope: str, results: list[dict], dropped: int, spec_url: str, index_url: str = ""
 ) -> str:
     done = [r for r in results if r["status"] == "done"]
     skipped = [r for r in results if r["status"] == "skip"]
     errors = [r for r in results if r["status"] == "error"]
 
     lines = [f"*Revamp `{scope}` — xong*"]
+    if index_url:
+        lines.append(f"📁 INDEX (tất cả page nằm dưới đây): {index_url}")
     lines.append(
         f"📄 {len(done)} module mới · ♻️ {len(skipped)} bỏ qua (đã có) · "
         f"❌ {len(errors)} lỗi"

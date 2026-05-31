@@ -71,6 +71,13 @@ CREATE TABLE IF NOT EXISTS revamp_modules (
     updated_at REAL NOT NULL,
     PRIMARY KEY (run_key, module)
 );
+
+CREATE TABLE IF NOT EXISTS revamp_runs (
+    run_key TEXT PRIMARY KEY,
+    index_page_id TEXT,
+    index_url TEXT,
+    updated_at REAL NOT NULL
+);
 """
 
 def _load_service_seeds() -> list[dict]:
@@ -457,6 +464,31 @@ def list_revamp_modules(run_key: str) -> list[dict]:
             (run_key,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_revamp_run(run_key: str) -> dict | None:
+    """The per-run Notion index page, so a rerun nests new module pages under the
+    same index instead of creating a fresh one."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM revamp_runs WHERE run_key=?", (run_key,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def upsert_revamp_run(run_key: str, index_page_id: str, index_url: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO revamp_runs(run_key, index_page_id, index_url, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(run_key) DO UPDATE SET
+                index_page_id = excluded.index_page_id,
+                index_url     = excluded.index_url,
+                updated_at    = excluded.updated_at
+            """,
+            (run_key, index_page_id, index_url, time.time()),
+        )
 
 
 def recent_runs_for_thread(thread_ts: str, limit: int = 20) -> list[dict]:

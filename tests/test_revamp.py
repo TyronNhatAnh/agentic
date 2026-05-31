@@ -232,6 +232,9 @@ async def test_pipeline_skips_done_modules(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rp, "get_revamp_module", fake_get)
     monkeypatch.setattr(rp, "upsert_revamp_module", lambda *a, **k: None)
+    # No existing index → pipeline creates one.
+    monkeypatch.setattr(rp, "get_revamp_run", lambda run_key: None)
+    monkeypatch.setattr(rp, "upsert_revamp_run", lambda *a, **k: None)
 
     analysed: list[str] = []
 
@@ -242,11 +245,11 @@ async def test_pipeline_skips_done_modules(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rp, "_run_oneshot", fake_oneshot)
 
-    created: list[str] = []
+    created: list[dict] = []
 
     async def fake_create_page(title, markdown="", parent_id=None):
-        created.append(title)
-        return ToolResult.success({"url": "https://notion.so/new", "id": "n"})
+        created.append({"title": title, "parent_id": parent_id})
+        return ToolResult.success({"url": "https://notion.so/new", "id": "IDX"})
 
     monkeypatch.setattr(rp.notion_int, "create_page", fake_create_page)
 
@@ -255,14 +258,55 @@ async def test_pipeline_skips_done_modules(tmp_path, monkeypatch):
         slack_client=None, placeholder_ts=None,
     )
 
+    titles = [c["title"] for c in created]
+    # Index page created first; mod_b + SPEC nested under it (parent_id == index id).
+    assert any("INDEX" in t for t in titles)
+    nested = [c for c in created if "INDEX" not in c["title"]]
+    assert nested and all(c["parent_id"] == "IDX" for c in nested)
     # mod_a never analysed (skipped); mod_b analysed; SPEC synthesised.
     assert not any("mod_a" in p for p in analysed)
     assert any("mod_b" in p for p in analysed)
     assert "♻️" in summary and "mod_a" in summary
     assert "✅" in summary and "mod_b" in summary
-    # mod_b page + SPEC page created (mod_a reused old url).
-    assert any(t.endswith("mod_b") for t in created)
-    assert any("SPRINT SPEC" in t for t in created)
+    assert any(t.endswith("mod_b") for t in titles)
+    assert any("SPRINT SPEC" in t for t in titles)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_reuses_existing_index(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "revamp_legacy_repo", str(tmp_path), raising=False)
+    monkeypatch.setattr(settings, "notion_token", "secret", raising=False)
+    monkeypatch.setattr(settings, "notion_parent_page_id", "parent", raising=False)
+    monkeypatch.setattr(rp, "_scan_modules", lambda repo, scope: (["mod_x"], 0))
+    monkeypatch.setattr(rp, "get_revamp_module", lambda rk, m: None)
+    monkeypatch.setattr(rp, "upsert_revamp_module", lambda *a, **k: None)
+    # Existing index → must NOT create a new one; nest under the existing id.
+    monkeypatch.setattr(
+        rp, "get_revamp_run",
+        lambda rk: {"index_page_id": "OLD", "index_url": "https://notion.so/old"},
+    )
+    monkeypatch.setattr(rp, "upsert_revamp_run", lambda *a, **k: None)
+
+    async def fake_oneshot(**k):
+        return "doc"
+
+    monkeypatch.setattr(rp, "_run_oneshot", fake_oneshot)
+
+    created: list[dict] = []
+
+    async def fake_create_page(title, markdown="", parent_id=None):
+        created.append({"title": title, "parent_id": parent_id})
+        return ToolResult.success({"url": "u", "id": "n"})
+
+    monkeypatch.setattr(rp.notion_int, "create_page", fake_create_page)
+
+    await rp.run_revamp_pipeline(
+        scope="app", thread_ts="t", channel="c",
+        slack_client=None, placeholder_ts=None,
+    )
+
+    assert not any("INDEX" in c["title"] for c in created)  # reused, not recreated
+    assert all(c["parent_id"] == "OLD" for c in created)    # nested under existing
 
 
 # --------------------------------------------------------------------------- #
