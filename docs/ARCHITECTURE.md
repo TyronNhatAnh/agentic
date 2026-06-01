@@ -1,12 +1,5 @@
 # Kiến trúc — Brain session trên Claude Agent SDK
 
-> **Điểm cốt lõi (đọc trước):** Không có lớp nào "wrap SDK client vào `claude -p`".
-> Migration đã hoàn tất — đường `claude -p` / ReAct loop Python đã bị **gỡ bỏ**.
-> Runtime thật là `ClaudeSDKClient` gọi `client.query()` trực tiếp.
-> `subprocess` chỉ còn sót ở 2 chỗ không liên quan brain: check `claude --version`
-> lúc startup ([main.py:40](../src/agentic/main.py#L40)) và chạy lệnh `git`
-> ([integrations/git.py:28](../src/agentic/integrations/git.py#L28)).
-
 ---
 
 ## 1. Mô hình tổng thể
@@ -119,14 +112,3 @@ system prompt — xem `_compose_user_message`
 - `session_id` được persist về `threads.sdk_session_id` sau mỗi turn để resume.
 
 ---
-
-## 5. Cái KHÔNG tồn tại (chống hiểu nhầm)
-
-- ❌ Không có `claude -p` subprocess path.
-- ❌ Không có Python ReAct loop / JSON-from-stdout parsing.
-- ❌ Không có cờ `AGENTIC_USE_SDK` (migration xong, không còn nhánh điều kiện).
-- ❌ Không có progress-message loop riêng — partial text stream **chính là** progress.
-- ❌ Không có bảng `pending_confirmations` — confirm state là `asyncio.Future`
-  in-memory.
-
-Lịch sử migration: [MIGRATION_PLAN.md](../MIGRATION_PLAN.md).

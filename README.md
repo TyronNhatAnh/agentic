@@ -47,6 +47,9 @@ make install           # .venv + editable install + copy .env.example -> .env
 # then edit .env (see .env.example for the full list)
 ```
 
+> **Lấy key & chạy từ A-Z:** [docs/SETUP.md](docs/SETUP.md) — cách lấy token Slack /
+> GitHub / Jira / Notion / Grafana, điền `.env`, và toàn bộ lệnh Makefile.
+
 Required env: `SLACK_BOT_TOKEN` (xoxb-), `SLACK_APP_TOKEN` (xapp-, Socket Mode).
 Optional: `GITHUB_TOKEN` + `GITHUB_DEFAULT_REPO`, `JIRA_*`, `SLACK_ALLOWED_CHANNELS`,
 `WORKER_CONCURRENCY`, `CLAUDE_BIN`, `WORKSPACE_DIR`/`WORKTREE_DIR`, `AGENTIC_SERVICES_JSON`,
