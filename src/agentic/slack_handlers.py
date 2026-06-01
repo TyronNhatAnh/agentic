@@ -99,18 +99,85 @@ def _placeholder_for(text: str) -> str:
     return "⏳ Đang xử lý..."
 
 
+# A GFM table separator row, e.g. `|---|:--:|` (the line under the header).
+_TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
+# `[label](http://url)` — converted to Slack's `<url|label>` link syntax.
+_MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+
+
+def _inline_mrkdwn(line: str) -> str:
+    """Inline GitHub-markdown → Slack-mrkdwn on a single non-table line."""
+    line = _MD_LINK_RE.sub(r"<\2|\1>", line)
+    line = re.sub(r"\*\*([^*\n]+)\*\*", r"*\1*", line)
+    line = re.sub(r"__([^_\n]+)__", r"*\1*", line)
+    line = re.sub(r"~~([^~\n]+)~~", r"~\1~", line)
+    return line
+
+
+def _strip_inline_md(cell: str) -> str:
+    """Flatten inline markup inside a table cell — Slack does not render mrkdwn
+    inside ``` code blocks, so `**x**`/`` `x` ``/links would otherwise show raw."""
+    cell = _MD_LINK_RE.sub(r"\1 (\2)", cell)
+    cell = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", cell)
+    cell = cell.replace("**", "").replace("`", "")
+    return cell.strip()
+
+
+def _split_table_row(line: str) -> list[str]:
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
+def _render_table(rows: list[str]) -> list[str]:
+    """Render a markdown table (header + body lines, separator already dropped)
+    into a monospace code block so columns align on Slack, which has no tables."""
+    parsed = [[_strip_inline_md(c) for c in _split_table_row(r)] for r in rows]
+    ncol = max(len(r) for r in parsed)
+    for r in parsed:
+        r.extend([""] * (ncol - len(r)))
+    widths = [max(len(r[i]) for r in parsed) for i in range(ncol)]
+    out = ["```"]
+    for r in parsed:
+        out.append(" | ".join(r[i].ljust(widths[i]) for i in range(ncol)).rstrip())
+    out.append("```")
+    return out
+
+
 def _to_slack_mrkdwn(text: str) -> str:
-    lines: list[str] = []
-    for line in text.splitlines():
+    src = text.splitlines()
+    out: list[str] = []
+    i, n = 0, len(src)
+    while i < n:
+        line = src[i]
+        # GFM table: a `|`-row immediately followed by a separator row. Collect
+        # the header + all following pipe rows and render as one code block.
+        if (
+            "|" in line
+            and i + 1 < n
+            and "|" in src[i + 1]
+            and _TABLE_SEP_RE.match(src[i + 1])
+        ):
+            block = [line]
+            j = i + 2
+            while j < n and "|" in src[j] and src[j].strip():
+                block.append(src[j])
+                j += 1
+            out.extend(_render_table(block))
+            i = j
+            continue
         stripped = line.lstrip()
         if stripped.startswith("#"):
             prefix_len = len(line) - len(stripped)
             hashes = len(stripped) - len(stripped.lstrip("#"))
             if 1 <= hashes <= 6 and stripped[hashes:].startswith(" "):
                 line = line[:prefix_len] + stripped[hashes + 1 :]
-        lines.append(line)
-    text = "\n".join(lines)
-    return re.sub(r"\*\*([^*\n]+)\*\*", r"*\1*", text)
+        out.append(_inline_mrkdwn(line))
+        i += 1
+    return "\n".join(out)
 
 
 def _chunks(text: str, limit: int = _SLACK_CHUNK_LEN) -> list[str]:
