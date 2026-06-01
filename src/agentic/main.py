@@ -8,6 +8,7 @@ from slack_bolt.async_app import AsyncApp
 
 from .config import settings
 from .dispatcher import handle_message, init_sdk_singletons
+from .monitor import start_monitor
 from .sdk import (
     PendingPermissions,
     SqliteSessionStore,
@@ -85,6 +86,7 @@ async def _main() -> None:
     sweeper = asyncio.create_task(
         _sdk_idle_sweeper(brain_pool), name="agentic-sdk-idle-sweep"
     )
+    monitor = start_monitor(app.client)
     handler = AsyncSocketModeHandler(app, settings.slack_app_token)
     logging.getLogger(__name__).info(
         "⚡️ Bolt app started (Socket Mode), workers=%d",
@@ -94,6 +96,8 @@ async def _main() -> None:
         await handler.start_async()
     finally:
         sweeper.cancel()
+        if monitor:
+            monitor.cancel()
         await brain_pool.shutdown_all()
 
 

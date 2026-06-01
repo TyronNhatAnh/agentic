@@ -111,6 +111,24 @@ class Settings(BaseSettings):
 
     slack_allowed_channels: str = Field(default="", alias="SLACK_ALLOWED_CHANNELS")
 
+    # --- Hourly server-health monitor ([monitor.py]). A single background task
+    # counts ERROR-level Loki lines per registered service + pings health URLs,
+    # then posts a digest to MONITOR_CHANNEL. Disabled until MONITOR_ENABLED=true
+    # AND MONITOR_CHANNEL is set (else start_monitor no-ops with a warning, so a
+    # restart never breaks). Posts only when notable unless MONITOR_ALWAYS_POST.
+    monitor_enabled: bool = Field(default=False, alias="MONITOR_ENABLED")
+    monitor_channel: str = Field(default="", alias="MONITOR_CHANNEL")
+    monitor_interval_s: int = Field(default=3600, alias="MONITOR_INTERVAL_S")
+    monitor_env: str = Field(default="prod", alias="MONITOR_ENV")
+    monitor_window: str = Field(default="1h", alias="MONITOR_WINDOW")
+    # Empty = every registered service that has a loki_selector; else a CSV of
+    # service names/aliases to narrow the watch list.
+    monitor_services: str = Field(default="", alias="MONITOR_SERVICES")
+    monitor_error_threshold: int = Field(default=20, alias="MONITOR_ERROR_THRESHOLD")
+    # CSV of `name=url` (or bare `url`) HTTP endpoints to GET each cycle.
+    monitor_health_urls: str = Field(default="", alias="MONITOR_HEALTH_URLS")
+    monitor_always_post: bool = Field(default=False, alias="MONITOR_ALWAYS_POST")
+
     min_claude_version: str = Field(default="2.0.0", alias="MIN_CLAUDE_VERSION")
     sdk_session_idle_ttl_s: int = Field(default=1800, alias="SDK_SESSION_IDLE_TTL_S")
     sdk_max_concurrent_sessions: int = Field(default=20, alias="SDK_MAX_CONCURRENT_SESSIONS")

@@ -282,6 +282,51 @@ async def list_datasources(env: str = "stag") -> ToolResult:
     return ToolResult.success("\n".join(lines))
 
 
+# LogQL line filter that matches the common error/exception signatures. Kept in
+# one place so search and the monitor count the same set of lines.
+_ERROR_FILTER = '|~ "(?i)error|exception|fatal|panic|traceback|critical"'
+
+
+async def count_errors(
+    selector: str, env: str = "prod", window: str = "1h"
+) -> int | None:
+    """Count ERROR-ish Loki lines for a stream selector over `window`.
+
+    Used by the background health monitor — not exposed as a brain tool. Runs a
+    Loki *instant* metric query (`sum(count_over_time(<selector> <errfilter> [w]))`)
+    so we get a single number, not a page of log lines. Returns the count, or
+    None if the query failed / Grafana isn't configured (the caller surfaces the
+    failure separately from a real zero).
+    """
+    try:
+        base, token, uid, env_token = _env_conf(env)
+    except (RuntimeError, ValueError):
+        return None
+    uid = (uid or "").strip()
+    if not uid:
+        return None
+    selector = selector.replace("{env}", env_token)
+    metric = f"sum(count_over_time({selector} {_ERROR_FILTER} [{window}]))"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(
+                _proxy_url(base, uid, "/loki/api/v1/query"),
+                headers=_headers(token),
+                params={"query": metric, "time": _to_ns("now")},
+            )
+            r.raise_for_status()
+            payload = r.json()
+    except Exception:
+        return None
+    result = (payload.get("data") or {}).get("result") or []
+    if not result:  # vector with no series = zero matches
+        return 0
+    try:
+        return int(float(result[0]["value"][1]))
+    except (KeyError, IndexError, ValueError, TypeError):
+        return None
+
+
 # ---------- dispatch ----------
 
 ACTION_HANDLERS = {
