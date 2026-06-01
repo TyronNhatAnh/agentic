@@ -59,13 +59,17 @@ REVIEW_ALLOWED_TOOLS: list[str] = [
 
 # Archaeologist reads a legacy module and returns a design doc. Pure read — same
 # rationale as review (a doc-producer must not be able to mutate): no Bash, no
-# write, no MCP tool. The revamp pipeline also runs this prompt as a one-shot SDK
-# query per module (revamp_pipeline.py); the AgentDefinition is the interactive
-# entry point via the brain's Task tool.
+# write. The one MCP tool it gets is `db_query` (read-only MariaDB introspection)
+# because the legacy `db/schema.rb` is stale and config lives in DB rows — the live
+# schema/config is recoverable only from the DB, never from source. The revamp
+# pipeline also runs this prompt as a one-shot SDK query per module
+# (revamp_pipeline.py); the AgentDefinition is the interactive entry point via the
+# brain's Task tool.
 ARCHAEOLOGIST_ALLOWED_TOOLS: list[str] = [
     "Read",
     "Glob",
     "Grep",
+    "mcp__agentic__db_query",
 ]
 
 
@@ -114,6 +118,7 @@ def build_subagents() -> dict[str, AgentDefinition]:
             ),
             prompt=load_prompt("archaeologist"),
             tools=ARCHAEOLOGIST_ALLOWED_TOOLS,
+            mcpServers=["agentic"],
             model=settings.agent_model,
         ),
         "dev": AgentDefinition(

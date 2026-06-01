@@ -325,3 +325,67 @@ def test_revamp_scope_only_in_revamp_channel(monkeypatch):
 def test_revamp_scope_disabled_without_config(monkeypatch):
     monkeypatch.setattr(settings, "revamp_channel_id", "", raising=False)
     assert _revamp_scope("revamp x", "CREVAMP") is None
+
+
+# --------------------------------------------------------------------------- #
+# db_query read-only guard (pure, no DB connection)
+# --------------------------------------------------------------------------- #
+
+from agentic.integrations import db as db_int  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "INSERT INTO t VALUES (1)",
+        "UPDATE t SET a=1",
+        "DELETE FROM t",
+        "DROP TABLE t",
+        "REPLACE INTO t VALUES (1)",
+        "TRUNCATE t",
+        "SET SESSION x=1",
+        "CALL do_thing()",
+        "SELECT 1; DROP TABLE t",          # multi-statement
+        "/* sneaky */ DELETE FROM t",      # verb hidden behind a comment
+        "-- c\nUPDATE t SET a=1",
+        "",
+    ],
+)
+def test_guard_rejects_non_read(sql):
+    safe, err = db_int.guard_sql(sql, row_cap=200)
+    assert safe is None
+    assert err is not None and not err.ok
+    assert err.error_code == "VALIDATION"
+
+
+def test_guard_allows_read_and_caps_limit():
+    safe, err = db_int.guard_sql("SELECT * FROM orders", row_cap=50)
+    assert err is None
+    assert safe == "SELECT * FROM orders LIMIT 50"
+
+
+def test_guard_keeps_existing_limit():
+    safe, err = db_int.guard_sql("SELECT * FROM orders LIMIT 5", row_cap=200)
+    assert err is None
+    assert safe == "SELECT * FROM orders LIMIT 5"
+
+
+@pytest.mark.parametrize("sql", ["SHOW TABLES", "DESCRIBE orders", "EXPLAIN SELECT 1"])
+def test_guard_allows_bounded_introspection_without_limit(sql):
+    safe, err = db_int.guard_sql(sql, row_cap=200)
+    assert err is None
+    assert safe == sql  # no LIMIT appended to inherently-bounded statements
+
+
+def test_guard_strips_trailing_semicolon():
+    safe, err = db_int.guard_sql("SHOW TABLES;", row_cap=200)
+    assert err is None
+    assert safe == "SHOW TABLES"
+
+
+async def test_query_returns_config_error_when_unconfigured(monkeypatch):
+    monkeypatch.setattr(db_int.settings, "revamp_db_host", "", raising=False)
+    monkeypatch.setattr(db_int.settings, "revamp_db_name", "", raising=False)
+    res = await db_int.query("SELECT 1")
+    assert not res.ok
+    assert res.error_code == "CONFIG"

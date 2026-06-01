@@ -117,7 +117,8 @@
       "Bash(curl -s -o /dev/null -w \"  root HTTP %{http_code}\\\\n\" \"https://grafana-kr.gogo.tech/api/health\")",
       "Bash(curl -s \"https://grafana-kr.gogo.tech/api/health\")",
       "Bash(curl -s -H \"Authorization: Bearer glsa_bogus\" \"https://grafana-kr.gogo.tech/api/datasources\")",
-      "Bash([ -d \"$D/.git\" ])"
+      "Bash([ -d \"$D/.git\" ])",
+      "WebFetch(domain:support.claude.com)"
     ],
     "deny": [
       "Read(//Users/tyron/Projects/agentic/.env)",

@@ -26,6 +26,7 @@ from typing import Any, Awaitable, Callable
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from ..integrations import db as db_int
 from ..integrations import git as git_int
 from ..integrations import github as github_int
 from ..integrations import grafana as grafana_int
@@ -842,6 +843,39 @@ async def grafana_list_datasources(args: dict[str, Any]) -> dict[str, Any]:
 
 
 # ============================================================================
+# Revamp DB (1) — read-only MariaDB introspection for the archaeologist
+# ============================================================================
+
+@tool(
+    "db_query",
+    (
+        "Run ONE read-only SQL statement against the revamp legacy DB (a local "
+        "MariaDB staging clone) and return the rows. Use this for the *current* "
+        "schema and config-in-DB values — the legacy `db/schema.rb` is outdated, "
+        "live introspection is the source of truth. "
+        "Allowed: SELECT / SHOW / DESCRIBE / EXPLAIN / WITH only; mutations and "
+        "multi-statements are rejected. Examples: "
+        "`SHOW TABLES`, `DESCRIBE orders`, "
+        "`SELECT column_name, data_type FROM information_schema.columns "
+        "WHERE table_name='orders'`, `SELECT * FROM feature_flags`. "
+        "A bare SELECT without LIMIT is capped automatically. Read-only — no confirm."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "sql": {"type": "string", "description": "one read-only statement"},
+        },
+        "required": ["sql"],
+    },
+)
+async def db_query(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: db_int.query(args.get("sql", "")),
+        retryable_read=True, service="DB",
+    )
+
+
+# ============================================================================
 # Ship (1)
 # ============================================================================
 
@@ -906,6 +940,8 @@ _ALL_TOOLS = [
     notion_create_page,
     # grafana (2)
     grafana_search_logs, grafana_list_datasources,
+    # revamp db (1)
+    db_query,
     # ship (1)
     ship_create_pr,
 ]

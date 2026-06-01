@@ -28,6 +28,7 @@ from claude_agent_sdk import (
 from .agents.base import load_prompt
 from .config import settings
 from .integrations import notion as notion_int
+from .sdk.mcp_tools import build_agentic_mcp_server
 from .store import (
     get_revamp_module,
     get_revamp_run,
@@ -59,11 +60,16 @@ async def _run_oneshot(
     allowed_tools: list[str],
     cwd: str | None,
     add_dirs: list[str] | None,
+    with_agentic_mcp: bool = False,
 ) -> str:
     """Run an isolated single-turn SDK query and return its concatenated text.
 
     Isolated on purpose: a fresh client per call means a module's file reads stay
     out of the interactive brain session and out of every other module's context.
+
+    ``with_agentic_mcp`` attaches the in-process MCP server so ``allowed_tools`` can
+    include ``mcp__agentic__*`` (e.g. ``db_query`` for live schema/config). The SPEC
+    synthesis call leaves it off — it has no tools and needs no server.
     """
     opts = ClaudeAgentOptions(
         system_prompt=system_prompt,
@@ -72,6 +78,9 @@ async def _run_oneshot(
         model=settings.agent_model,
         cwd=cwd,
         add_dirs=add_dirs or [],
+        mcp_servers=(
+            {"agentic": build_agentic_mcp_server()} if with_agentic_mcp else {}
+        ),
     )
     client = ClaudeSDKClient(options=opts)
     await client.connect()
@@ -188,6 +197,13 @@ async def run_revamp_pipeline(
         return f"❌ Không tạo được trang INDEX trên Notion: {e}"
 
     archaeologist_prompt = load_prompt("archaeologist")
+    # Canonical migrations live in the common-services repo, not the legacy da-api
+    # (whose schema.rb is stale). Expose it read-only alongside the legacy repo so
+    # the archaeologist can Read the real migration history.
+    common_migrations = (settings.revamp_common_migrations_dir or "").strip()
+    extra_dirs = [legacy_repo]
+    if common_migrations and Path(common_migrations).is_dir():
+        extra_dirs.append(common_migrations)
     total = len(modules)
     fresh_docs: list[tuple[str, str]] = []  # (module, markdown) for SPEC input
     results: list[dict] = []  # {module, status, url, error}
@@ -210,9 +226,12 @@ async def run_revamp_pipeline(
                     "từ thư mục hiện tại). Đọc các file liên quan rồi trả về tài liệu "
                     "Markdown theo đúng cấu trúc đã hướng dẫn."
                 ),
-                allowed_tools=["Read", "Glob", "Grep"],
+                allowed_tools=[
+                    "Read", "Glob", "Grep", "mcp__agentic__db_query",
+                ],
                 cwd=legacy_repo,
-                add_dirs=[legacy_repo],
+                add_dirs=extra_dirs,
+                with_agentic_mcp=True,
             )
             if not markdown:
                 raise RuntimeError("archaeologist trả về rỗng")

@@ -61,6 +61,26 @@ class Settings(BaseSettings):
     # scope can't fan out into hundreds of archaeologist calls. The pipeline logs
     # when it truncates rather than silently dropping modules.
     revamp_module_cap: int = Field(default=40, alias="REVAMP_MODULE_CAP")
+    # Read-only MariaDB the archaeologist queries for the *current* schema and
+    # config-in-DB values (the legacy `db/schema.rb` is outdated; live introspection
+    # is the source of truth). Point this at a LOCAL staging clone, never prod, and
+    # use a SELECT-only grant — db_query also guards statements in Python. Empty
+    # host disables the db_query tool (it returns a CONFIG error instead of failing).
+    revamp_db_host: str = Field(default="", alias="REVAMP_DB_HOST")
+    revamp_db_port: int = Field(default=3306, alias="REVAMP_DB_PORT")
+    revamp_db_user: str = Field(default="", alias="REVAMP_DB_USER")
+    revamp_db_password: str = Field(default="", alias="REVAMP_DB_PASSWORD")
+    revamp_db_name: str = Field(default="", alias="REVAMP_DB_NAME")
+    # Cap rows a single db_query returns (appended as LIMIT when a SELECT omits one)
+    # and the per-statement timeout, so one query can't dump or stall the clone.
+    revamp_db_row_cap: int = Field(default=200, alias="REVAMP_DB_ROW_CAP")
+    revamp_db_timeout_s: int = Field(default=10, alias="REVAMP_DB_TIMEOUT_S")
+    # Path to the canonical migrations (the "common services" repo, NOT the legacy
+    # da-api repo whose schema.rb is stale). Added to the archaeologist's add_dirs so
+    # it can Read the real migration history alongside live DB introspection.
+    revamp_common_migrations_dir: str = Field(
+        default="", alias="REVAMP_COMMON_MIGRATIONS_DIR"
+    )
 
     workspace_dir: str = Field(default="", alias="WORKSPACE_DIR")
     worktree_dir: str = Field(default="", alias="WORKTREE_DIR")

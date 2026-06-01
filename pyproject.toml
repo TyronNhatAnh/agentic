@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-settings>=2.4.0",
     "python-dotenv>=1.0.1",
     "claude-agent-sdk>=0.2.87,<0.3.0",
+    "aiomysql>=0.2.0",
 ]
 
 [project.optional-dependencies]
