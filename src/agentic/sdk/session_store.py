@@ -1,82 +1,63 @@
 """SQLite-backed SessionStore adapter for claude-agent-sdk.
 
-Mirrors session transcripts into the `threads` table (column `sdk_state_blob`)
-keyed by `sdk_session_id`. Subprocess still writes its own JSONL locally; this
-adapter is the durable copy the bot resumes from across restarts.
+Mirrors session transcripts into the `session_entries` table keyed by
+(thread_ts, sdk_session_id). The subprocess still writes its own JSONL locally;
+this adapter is the durable copy the bot resumes from across restarts.
 
-Phase 0: skeleton with required `append` / `load` only. Subagent transcripts,
-list/list_subkeys, delete, and summary methods raise NotImplementedError —
-SDK probes for them at runtime and falls back gracefully (see types.py:1390).
-Phase 1 fills in what dev/brain sessions actually need.
+Append-only: each `append` inserts the new entries in a single transaction
+(O(new entries), atomic — a crash rolls back instead of leaving a half-written
+blob). This replaced the Phase 0 read-modify-write of `threads.sdk_state_blob`,
+which rewrote the whole transcript every turn and could corrupt on a mid-write
+crash. `load` falls back to the legacy blob once so sessions persisted before
+the migration still resume.
+
+Subagent transcripts (keys with a `subpath`) are still not persisted — they are
+recreated from the brain's delegation each turn. list/delete remain Phase 1.
 """
 
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 from claude_agent_sdk import SessionKey, SessionStoreEntry
 
-from ..store import connect
+from ..store import append_session_entries, load_session_entries, run_db
 
 
 class SqliteSessionStore:
-    """Persist SDK session transcripts in the `threads` table.
-
-    One row per Slack thread. `sdk_session_id` holds the latest session UUID;
-    `sdk_state_blob` holds the full transcript as JSON-encoded list[entry]. For
-    Phase 0 we overwrite the blob on each append — Phase 1 will switch to
-    incremental append + size cap to avoid rewriting megabytes per turn.
-    """
+    """Persist SDK session transcripts append-only in `session_entries`."""
 
     async def append(
         self, key: SessionKey, entries: list[SessionStoreEntry]
     ) -> None:
         if key.get("subpath"):
-            return  # subagent transcripts: not persisted in Phase 0
-        thread_ts = key["project_key"]
-        session_id = key["session_id"]
-        existing = await self._load_blob(thread_ts, session_id)
-        existing.extend(entries)
-        blob = json.dumps(existing)
-        with connect() as conn:
-            conn.execute(
-                "UPDATE threads SET sdk_session_id=?, sdk_state_blob=? "
-                "WHERE thread_ts=?",
-                (session_id, blob, thread_ts),
-            )
+            return  # subagent transcripts: not persisted
+        if not entries:
+            return
+        serialized = [json.dumps(e) for e in entries]
+        await run_db(
+            append_session_entries,
+            key["project_key"],
+            key["session_id"],
+            serialized,
+        )
 
     async def load(
         self, key: SessionKey
     ) -> list[SessionStoreEntry] | None:
         if key.get("subpath"):
             return None
-        thread_ts = key["project_key"]
-        session_id = key["session_id"]
-        return await self._load_blob(thread_ts, session_id) or None
+        rows = await run_db(
+            load_session_entries, key["project_key"], key["session_id"]
+        )
+        if not rows:
+            return None
+        return [json.loads(r) for r in rows]
 
-    async def _load_blob(
-        self, thread_ts: str, session_id: str
-    ) -> list[SessionStoreEntry]:
-        with connect() as conn:
-            row = conn.execute(
-                "SELECT sdk_session_id, sdk_state_blob FROM threads "
-                "WHERE thread_ts=?",
-                (thread_ts,),
-            ).fetchone()
-        if not row or row["sdk_session_id"] != session_id:
-            return []
-        raw = row["sdk_state_blob"] or "[]"
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            return []
-        return data if isinstance(data, list) else []
-
-    # Phase 1+ — implement when brain/dev sessions need them.
-    # The SDK probes for these at runtime; omitting them just disables the
-    # corresponding optional features (list/resume-by-mtime, cleanup, summaries).
+    # Phase 1+ — implement when brain/dev sessions need them. The SDK probes for
+    # these at runtime; omitting them just disables the corresponding optional
+    # features (list/resume-by-mtime, cleanup).
     async def list_sessions(self, project_key: str) -> list[dict[str, Any]]:
         raise NotImplementedError("Phase 1")
 

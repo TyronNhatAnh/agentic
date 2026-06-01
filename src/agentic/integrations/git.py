@@ -513,11 +513,56 @@ ACTION_HANDLERS = {
 }
 
 
+# Actions that fetch / create worktrees / commit / push against a repo. They are
+# serialized per repo_path so two threads (e.g. the same ticket mentioned in two
+# channels) can't race `git fetch` + `git worktree add` and leave a half-created
+# worktree. check_repo is read-only and runs unlocked.
+_MUTATING_ACTIONS = {
+    "git.prepare_workspace",
+    "git.prepare_pr_review_workspace",
+    "git.commit",
+    "git.push",
+}
+
+# Per-repo locks, created lazily. Bounded by the number of registered services.
+_repo_locks: dict[str, asyncio.Lock] = {}
+_repo_locks_guard = asyncio.Lock()
+
+
+async def _repo_lock(repo_path: str) -> asyncio.Lock:
+    async with _repo_locks_guard:
+        lock = _repo_locks.get(repo_path)
+        if lock is None:
+            lock = asyncio.Lock()
+            _repo_locks[repo_path] = lock
+        return lock
+
+
+def _repo_path_for_action(action_type: str, payload: dict) -> str | None:
+    """Resolve the main clone path so concurrent ops on it serialize. Returns
+    None when the service can't be resolved — the handler then reports the real
+    NOT_FOUND/CONFIG error instead of us masking it with a lock miss."""
+    try:
+        if action_type == "git.prepare_pr_review_workspace":
+            svc = resolve_service_by_github_repo(payload.get("repo", "") or "")
+        else:
+            svc = resolve_service(payload.get("service", "") or "")
+    except ValueError:
+        return None
+    return ((svc or {}).get("repo_path") or "").strip() or None
+
+
 async def execute_action(action_type: str, payload: dict) -> ToolResult:
     handler = ACTION_HANDLERS.get(action_type)
     if not handler:
         return ToolResult.failure("UNKNOWN_ACTION", f"unknown action `{action_type}`")
     try:
+        if action_type in _MUTATING_ACTIONS:
+            repo_path = _repo_path_for_action(action_type, payload)
+            if repo_path:
+                lock = await _repo_lock(repo_path)
+                async with lock:
+                    return await handler(payload)
         return await handler(payload)
     except Exception as e:
         return classify_exception(e, service="git")

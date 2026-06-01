@@ -32,6 +32,32 @@ from claude_agent_sdk import (
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Tool gating lives in ONE module so the three layers can't drift apart. When
+# adding a tool to mcp_tools.py, decide which layer (if any) it needs here:
+#
+#   1. SESSION_DISALLOWED_TOOLS — structural hard deny. The SDK strips these from
+#      context *before* can_use_tool runs, so it's a block, not a prompt request.
+#      Applied to the brain session AND every sub-agent (history-rewrite git).
+#   2. tool_scope (built per channel in policy.py) — an allowlist enforced by the
+#      callback below; a tool outside it is denied (e.g. revamp = read-only).
+#   3. CONFIRM_TOOLS — human-in-the-loop: the callback posts a Slack button and
+#      blocks until the user allows/denies (side-effecting PR ops).
+# ---------------------------------------------------------------------------
+
+# Session-wide hard deny — never rewrite history or force-push, for the brain or
+# any sub-agent. Single source of truth; sub_agents.py re-exports it as
+# DEV_DISALLOWED_TOOLS and brain_session passes it to disallowed_tools.
+SESSION_DISALLOWED_TOOLS: list[str] = [
+    "Bash(git push --force:*)",
+    "Bash(git push -f:*)",
+    "Bash(git push --force-with-lease:*)",
+    "Bash(git reset --hard:*)",
+    "Bash(git clean -fd:*)",
+    "Bash(git clean -f:*)",
+    "Bash(git branch -D:*)",
+]
+
 # Tools that always require user confirm via Slack button. These two have
 # user-visible side effects (approve/merge a PR) and are NOT in any
 # `allowed_tools` list, so the SDK actually routes them through this callback.

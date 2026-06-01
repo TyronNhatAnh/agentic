@@ -7,6 +7,7 @@ until Phase 3 collapses dev into AgentDefinition.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -28,8 +29,12 @@ from ..store import get_thread, update_thread_fields
 from .client_pool import ThreadSessionManager
 from .hooks import build_brain_hooks
 from .mcp_tools import build_agentic_mcp_server
-from .permission import PendingPermissions, build_slack_permission_callback
-from .sub_agents import DEV_DISALLOWED_TOOLS, build_subagents
+from .permission import (
+    SESSION_DISALLOWED_TOOLS,
+    PendingPermissions,
+    build_slack_permission_callback,
+)
+from .sub_agents import build_subagents
 
 log = logging.getLogger(__name__)
 
@@ -107,13 +112,17 @@ def make_brain_options_factory(
             # matters more than depth on a given deployment.
             model=settings.brain_model,
             permission_mode="default",
+            # SDK-native circuit breakers — the agent loop stops itself before the
+            # wall-clock deadline in run_brain_session fires. 0 → leave unset
+            # (SDK default = unbounded) so an operator can opt out per cap.
+            **_loop_caps(),
             # The brain runs with the full default tool palette (incl. Bash — that's
             # how it does `go build`/git/gh; the dev sub-agent can't get Bash from
             # the SDK, so the brain orchestrates git/build itself). Deny rules are
             # evaluated first and strip the tool from context entirely, closing the
             # history-rewrite hole at the session level: force-push / reset --hard /
             # clean are blocked for the brain too, not just the dev sub-agent.
-            disallowed_tools=DEV_DISALLOWED_TOOLS,
+            disallowed_tools=SESSION_DISALLOWED_TOOLS,
             can_use_tool=cb,
             agents=agents,
             hooks=build_brain_hooks(thread_ts=thread_ts, channel=channel),
@@ -124,6 +133,17 @@ def make_brain_options_factory(
         )
 
     return factory
+
+
+def _loop_caps() -> dict[str, Any]:
+    """SDK-native per-turn caps, omitted when set to 0 so an operator can disable
+    an individual cap (an absent kwarg leaves the SDK default = unbounded)."""
+    caps: dict[str, Any] = {}
+    if settings.brain_max_turns > 0:
+        caps["max_turns"] = settings.brain_max_turns
+    if settings.brain_max_budget_usd > 0:
+        caps["max_budget_usd"] = settings.brain_max_budget_usd
+    return caps
 
 
 def _session_dirs(row: dict, policy: WorkspacePolicy) -> tuple[str | None, list[str]]:
@@ -190,29 +210,52 @@ async def run_brain_session(
     # Per-tool runs logging now lives in the PostToolUse/PostToolUseFailure hooks
     # (§12.J); the stream loop only buffers text for Slack and counts tool uses
     # for the footer.
+    # Wall-clock circuit breaker: a hung SDK subprocess must not pin this worker
+    # forever (the SDK-native max_turns/max_budget caps stop a *looping* agent, but
+    # not a stalled stream). 0 disables the deadline. On expiry the pooled client is
+    # discarded below — its receive stream is half-consumed and unsafe to reuse.
+    deadline = settings.brain_timeout_s if settings.brain_timeout_s > 0 else None
+    timed_out = False
     try:
-        async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock) and block.text:
-                        text_parts.append(block.text)
-                    elif isinstance(block, ToolUseBlock):
-                        tool_use_count += 1
-                now = time.monotonic()
-                if text_parts and now - last_edit >= _STREAM_EDIT_INTERVAL_S:
-                    cooldown = await _safe_placeholder_update(
-                        slack_client, channel_id, placeholder_ts,
-                        "".join(text_parts),
-                    )
-                    # On a Slack 429 push the next allowed edit out by Retry-After
-                    # so the stream stops hammering chat.update.
-                    last_edit = now + cooldown
-            elif isinstance(msg, ResultMessage):
-                result_msg = msg
-                break
+        async with asyncio.timeout(deadline):
+            async for msg in client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock) and block.text:
+                            text_parts.append(block.text)
+                        elif isinstance(block, ToolUseBlock):
+                            tool_use_count += 1
+                    now = time.monotonic()
+                    if text_parts and now - last_edit >= _STREAM_EDIT_INTERVAL_S:
+                        cooldown = await _safe_placeholder_update(
+                            slack_client, channel_id, placeholder_ts,
+                            "".join(text_parts),
+                        )
+                        # On a Slack 429 push the next allowed edit out by Retry-After
+                        # so the stream stops hammering chat.update.
+                        last_edit = now + cooldown
+                elif isinstance(msg, ResultMessage):
+                    result_msg = msg
+                    break
+    except TimeoutError:
+        timed_out = True
+        log.warning("brain session timed out after %ss thread=%s", deadline, thread_ts)
+        error = (
+            f"hết thời gian xử lý ({deadline}s) — phiên đã được reset, "
+            "gửi lại yêu cầu nhé"
+        )
     except Exception as e:
         log.exception("brain session stream failed thread=%s", thread_ts)
         error = str(e) or e.__class__.__name__
+
+    # The pooled client's in-flight receive_response generator is left pending on a
+    # timeout — reusing it next turn would interleave two streams. Discard it; the
+    # persisted resume token reopens a clean session with the same history.
+    if timed_out:
+        try:
+            await pool.release(thread_ts)
+        except Exception:
+            log.exception("releasing timed-out brain client failed thread=%s", thread_ts)
 
     final_text = (
         result_msg.result if result_msg and result_msg.result
@@ -224,7 +267,23 @@ async def run_brain_session(
     session_id = (result_msg.session_id if result_msg else "") or ""
     cost = result_msg.total_cost_usd if result_msg else None
     if result_msg and result_msg.is_error and not error:
-        error = result_msg.result or result_msg.stop_reason or "result_error"
+        # A per-turn cap (max_turns / max_budget_usd) makes the SDK flag the result
+        # as an error while reporting the last turn's natural stop_reason
+        # (`tool_use` when cut mid-tool-loop, `end_turn`/`max_tokens` otherwise).
+        # Surface a human note instead of the cryptic raw reason, and keep whatever
+        # partial reply we streamed — the answer is truncated, not lost.
+        if (result_msg.stop_reason or "") in {"tool_use", "end_turn", "max_tokens"}:
+            error = (
+                "đạt giới hạn an toàn của một lượt (số bước hoặc chi phí) — "
+                "trả lời có thể chưa trọn, nhắn 'tiếp' để mình chạy nốt nhé"
+            )
+            log.warning(
+                "brain hit per-turn cap thread=%s stop=%s turns=%s cost=%s",
+                thread_ts, result_msg.stop_reason, result_msg.num_turns,
+                result_msg.total_cost_usd,
+            )
+        else:
+            error = result_msg.result or result_msg.stop_reason or "result_error"
     if session_id:
         try:
             update_thread_fields(thread_ts, sdk_session_id=session_id)

@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+from collections import OrderedDict
 
 from slack_bolt.async_app import AsyncApp
 
@@ -15,11 +16,24 @@ _BUSY_MSG = "⏳ Đang chạy job trước rồi, đợi xíu nha."
 _SLACK_CHUNK_LEN = 3500
 _CHANNEL_CACHE_TTL_S = 30 * 60  # 30 minutes — picks up renames within half an hour
 _USER_CACHE_TTL_S = 30 * 60
+# Hard ceiling on cache entries. Growth is naturally bounded by the workspace's
+# user/channel count, but a long-lived process in a large workspace should not
+# keep every identity it ever saw — evict least-recently-used past this cap.
+_CACHE_MAX_ENTRIES = 2000
 
-_channel_name_cache: dict[str, tuple[str, float]] = {}
+# Both are LRU: most-recently-used at the end, oldest evicted first past the cap.
+_channel_name_cache: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
 # uid -> (display_name, email, fetched_at)
-_user_info_cache: dict[str, tuple[str | None, str | None, float]] = {}
+_user_info_cache: "OrderedDict[str, tuple[str | None, str | None, float]]" = OrderedDict()
 _bot_user_id_cache: dict[str, str | None] = {}
+
+
+def _cache_put(cache: OrderedDict, key: str, value: tuple) -> None:
+    """Insert/refresh an LRU entry and evict the oldest beyond the cap."""
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > _CACHE_MAX_ENTRIES:
+        cache.popitem(last=False)
 
 
 async def _bot_user_id(client) -> str | None:
@@ -42,6 +56,7 @@ async def _user_label(client, user_id: str) -> str | None:
     now = time.time()
     if cached is not None and now - cached[2] < _USER_CACHE_TTL_S:
         name, email = cached[0], cached[1]
+        _user_info_cache.move_to_end(user_id)  # mark recently used
     else:
         name: str | None = None
         email: str | None = None
@@ -60,7 +75,7 @@ async def _user_label(client, user_id: str) -> str | None:
             log.warning("users_info failed for %s: %s", user_id, e)
             if cached is not None:
                 name, email = cached[0], cached[1]  # reuse stale on transient failure
-        _user_info_cache[user_id] = (name, email, now)
+        _cache_put(_user_info_cache, user_id, (name, email, now))
     if not name:
         return None
     return f"@{name} ({email})" if email else f"@{name}"
@@ -246,6 +261,7 @@ async def _channel_name(client, channel_id: str) -> str | None:
     cached = _channel_name_cache.get(channel_id)
     now = time.time()
     if cached is not None and now - cached[1] < _CHANNEL_CACHE_TTL_S:
+        _channel_name_cache.move_to_end(channel_id)  # mark recently used
         return cached[0]
     try:
         resp = await client.conversations_info(channel=channel_id)
@@ -254,7 +270,7 @@ async def _channel_name(client, channel_id: str) -> str | None:
         log.warning("conversations_info failed for %s: %s", channel_id, e)
         # Reuse stale cache on transient failure rather than denying access.
         return cached[0] if cached else None
-    _channel_name_cache[channel_id] = (name.lower(), now)
+    _cache_put(_channel_name_cache, channel_id, (name.lower(), now))
     return _channel_name_cache[channel_id][0]
 
 

@@ -13,6 +13,7 @@ from claude_agent_sdk import AgentDefinition
 
 from ..agents.base import load_prompt
 from ..config import settings
+from .permission import SESSION_DISALLOWED_TOOLS
 
 # Mirrors the legacy agents/dev.py allowlist plus the editor/search primitives
 # the SDK exposes natively. Kept verbatim so dev still finishes edit → commit
@@ -32,16 +33,11 @@ DEV_ALLOWED_TOOLS: list[str] = [
     "Grep",
 ]
 
-# Safety boundary — never rewrite history or force-push.
-DEV_DISALLOWED_TOOLS: list[str] = [
-    "Bash(git push --force:*)",
-    "Bash(git push -f:*)",
-    "Bash(git push --force-with-lease:*)",
-    "Bash(git reset --hard:*)",
-    "Bash(git clean -fd:*)",
-    "Bash(git clean -f:*)",
-    "Bash(git branch -D:*)",
-]
+# Safety boundary — never rewrite history or force-push. Defined once in
+# permission.py (the gating module) and applied to both the dev sub-agent and the
+# brain session; kept as DEV_DISALLOWED_TOOLS here for the dev AgentDefinition and
+# existing references.
+DEV_DISALLOWED_TOOLS = SESSION_DISALLOWED_TOOLS
 
 # Review reads code + fetches PR data via MCP. It deliberately gets NO Bash:
 # `tools` is a bare-name allowlist, so the old "Bash(git diff:*)" entries granted

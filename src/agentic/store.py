@@ -78,6 +78,22 @@ CREATE TABLE IF NOT EXISTS revamp_runs (
     index_url TEXT,
     updated_at REAL NOT NULL
 );
+
+-- SDK session transcript, append-only. Replaces the read-modify-write of the
+-- `threads.sdk_state_blob` column: one row per entry, so an append is O(new
+-- entries) and atomic per-transaction (a crash mid-append rolls back instead of
+-- leaving a half-written megabyte blob). One live session per thread; entries
+-- for superseded session_ids are pruned on the next append.
+CREATE TABLE IF NOT EXISTS session_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_ts TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    entry TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_entries
+    ON session_entries(thread_ts, session_id, id);
 """
 
 def _load_service_seeds() -> list[dict]:
@@ -489,6 +505,60 @@ def upsert_revamp_run(run_key: str, index_page_id: str, index_url: str) -> None:
             """,
             (run_key, index_page_id, index_url, time.time()),
         )
+
+
+def append_session_entries(
+    thread_ts: str, session_id: str, entries: list[str]
+) -> None:
+    """Append already-serialized transcript entries for a thread's live session.
+
+    One transaction: prune any rows from a superseded session_id, persist the
+    resume token, then insert the new rows. A crash rolls the whole thing back —
+    unlike the old full-blob overwrite, there is no partial/corrupt state. The
+    blob is O(new entries), not O(transcript)."""
+    if not entries:
+        return
+    now = time.time()
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM session_entries WHERE thread_ts=? AND session_id<>?",
+            (thread_ts, session_id),
+        )
+        conn.execute(
+            "UPDATE threads SET sdk_session_id=? WHERE thread_ts=?",
+            (session_id, thread_ts),
+        )
+        conn.executemany(
+            "INSERT INTO session_entries(thread_ts, session_id, entry, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            [(thread_ts, session_id, e, now) for e in entries],
+        )
+
+
+def load_session_entries(thread_ts: str, session_id: str) -> list[str]:
+    """Return serialized entries for a thread's session in insertion order.
+
+    Falls back to the legacy `threads.sdk_state_blob` (a JSON list) once, so a
+    session persisted before the append-only migration still resumes."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT entry FROM session_entries "
+            "WHERE thread_ts=? AND session_id=? ORDER BY id",
+            (thread_ts, session_id),
+        ).fetchall()
+        if rows:
+            return [r["entry"] for r in rows]
+        legacy = conn.execute(
+            "SELECT sdk_session_id, sdk_state_blob FROM threads WHERE thread_ts=?",
+            (thread_ts,),
+        ).fetchone()
+    if not legacy or legacy["sdk_session_id"] != session_id:
+        return []
+    try:
+        data = json.loads(legacy["sdk_state_blob"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [json.dumps(e) for e in data] if isinstance(data, list) else []
 
 
 def recent_runs_for_thread(thread_ts: str, limit: int = 20) -> list[dict]:
