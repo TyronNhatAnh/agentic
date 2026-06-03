@@ -62,10 +62,11 @@ def _env_conf(env: str | None) -> tuple[str, str, str, str]:
             settings.grafana_api_key_stag,
             settings.grafana_stag_loki_uid,
         )
-    if not base or not token:
+    if not base or not (token or (settings.grafana_sa_kr or "").strip()):
         bucket = "prod" if e == "prod" else "stag"
         raise RuntimeError(
-            f"Grafana {bucket} chưa cấu hình (GRAFANA_API_KEY_* / GRAFANA_*_BASE_URL)."
+            f"Grafana {bucket} chưa cấu hình "
+            f"(GRAFANA_SA_KR hoặc GRAFANA_API_KEY_* / GRAFANA_*_BASE_URL)."
         )
     return base.rstrip("/"), token, uid, e
 
@@ -103,7 +104,21 @@ def _to_ns(expr: str) -> str:
 
 
 def _headers(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    # When the SA basic-auth credential is set we authenticate via `auth=` (see
+    # `_basic_auth`) and omit the Bearer header entirely — the per-env glsa_ tokens
+    # were revoked (401), so Bearer is only the legacy fallback when no SA is set.
+    h = {"Accept": "application/json"}
+    if not (settings.grafana_sa_kr or "").strip():
+        h["Authorization"] = f"Bearer {token}"
+    return h
+
+
+def _basic_auth() -> httpx.BasicAuth | None:
+    """SA basic-auth (one credential, works on both nonprod + prod-kr). Returns
+    None when unset so httpx sends no auth and `_headers` supplies the Bearer
+    fallback instead."""
+    sa = (settings.grafana_sa_kr or "").strip()
+    return httpx.BasicAuth(settings.grafana_sa_user, sa) if sa else None
 
 
 def _proxy_url(base: str, uid: str, path: str) -> str:
@@ -254,6 +269,7 @@ async def search_logs(
             _proxy_url(base, uid, "/loki/api/v1/query_range"),
             headers=_headers(token),
             params=params,
+            auth=_basic_auth(),
         )
         if r.status_code == 400:
             detail = (r.json() or {}).get("message") if r.headers.get(
@@ -270,7 +286,9 @@ async def search_logs(
 async def list_datasources(env: str = "stag") -> ToolResult:
     base, token, _, _ = _env_conf(env)
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{base}/api/datasources", headers=_headers(token))
+        r = await client.get(
+            f"{base}/api/datasources", headers=_headers(token), auth=_basic_auth()
+        )
         r.raise_for_status()
         items = r.json()
     if not items:
@@ -313,6 +331,7 @@ async def count_errors(
                 _proxy_url(base, uid, "/loki/api/v1/query"),
                 headers=_headers(token),
                 params={"query": metric, "time": _to_ns("now")},
+                auth=_basic_auth(),
             )
             r.raise_for_status()
             payload = r.json()

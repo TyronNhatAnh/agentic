@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     grafana_api_key_prod: str = Field(default="", alias="GRAFANA_API_KEY_PROD")
     grafana_prod_base_url: str = Field(default="", alias="GRAFANA_PROD_BASE_URL")
     grafana_prod_loki_uid: str = Field(default="", alias="GRAFANA_PROD_LOKI_UID")
+    # Service-account basic-auth credential (devops-issued). One credential works on
+    # BOTH the nonprod and prod-kr Grafana instances, so when set it supersedes the
+    # per-env glsa_ Bearer tokens above (which were revoked → 401). User defaults to
+    # the SA name; only the password lives in GRAFANA_SA_KR.
+    grafana_sa_kr: str = Field(default="", alias="GRAFANA_SA_KR")
+    grafana_sa_user: str = Field(default="grafana-sa-kr", alias="GRAFANA_SA_USER")
 
     jira_base_url: str = Field(default="", alias="JIRA_BASE_URL")
     jira_email: str = Field(default="", alias="JIRA_EMAIL")
