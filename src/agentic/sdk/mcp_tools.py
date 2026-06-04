@@ -361,11 +361,19 @@ async def github_list_notifications(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "github_search",
-    "GitHub /search/issues query. Use full GitHub search syntax in `query`.",
+    (
+        "GitHub /search/issues query. This endpoint indexes issues & PRs only — "
+        "supported qualifiers include `repo:owner/name`, `is:pr`/`is:issue`, "
+        "`is:open`, `author:`, `label:`, `in:title`/`in:body`, and free-text words. "
+        "It does NOT support code/branch qualifiers like `head:` or `base:` (→ HTTP 422). "
+        "To find the PR for a branch, search free-text on the ticket key "
+        "(e.g. `repo:owner/name is:pr KRP-1234 in:title`); resolve `owner/name` via "
+        "`list_services` first — never guess the slug."
+    ),
     {
         "type": "object",
         "properties": {
-            "query": {"type": "string"},
+            "query": {"type": "string", "description": "issue-search syntax; no head:/base: qualifiers"},
             "kind": {"type": "string", "description": "label for the result section"},
         },
         "required": ["query"],
@@ -385,7 +393,14 @@ async def github_search(args: dict[str, Any]) -> dict[str, Any]:
         "type": "object",
         "properties": {
             "pr": {"type": "integer"},
-            "repo": {"type": "string"},
+            "repo": {
+                "type": "string",
+                "description": (
+                    "exact `owner/name` slug (e.g. `GoGoXTech/order-service`) — NOT a "
+                    "loose service name. Resolve it via `list_services` first; never "
+                    "guess the owner/org."
+                ),
+            },
         },
         "required": ["pr"],
     },
@@ -404,7 +419,14 @@ async def github_get_pr(args: dict[str, Any]) -> dict[str, Any]:
         "type": "object",
         "properties": {
             "pr": {"type": "integer"},
-            "repo": {"type": "string"},
+            "repo": {
+                "type": "string",
+                "description": (
+                    "exact `owner/name` slug (e.g. `GoGoXTech/order-service`) — NOT a "
+                    "loose service name. Resolve it via `list_services` first; never "
+                    "guess the owner/org."
+                ),
+            },
             "max_chars": {"type": "integer"},
         },
         "required": ["pr"],
