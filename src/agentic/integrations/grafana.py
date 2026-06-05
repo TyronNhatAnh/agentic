@@ -5,8 +5,9 @@ We hit Loki's *native* query API through Grafana's datasource proxy
 because the native response is plain Loki JSON (`data.result[].values`) and parses
 deterministically, while `/api/ds/query` returns columnar dataframes.
 
-Two environments (stag/prod) each carry their own base URL + API key + Loki
-datasource UID; the `env` payload field selects which.
+Two environments (stag/prod) each carry their own base URL + Loki datasource UID;
+the `env` payload field selects which. Auth is a single SA basic-auth credential
+(GRAFANA_SA_KR) shared across both instances.
 """
 
 from __future__ import annotations
@@ -47,28 +48,19 @@ def _norm_env(env: str | None) -> str:
     return _ENV_ALIASES[key]
 
 
-def _env_conf(env: str | None) -> tuple[str, str, str, str]:
-    """Return (base_url, token, loki_uid, env_token) for the requested environment."""
+def _env_conf(env: str | None) -> tuple[str, str, str]:
+    """Return (base_url, loki_uid, env_token) for the requested environment."""
     e = _norm_env(env)
     if e == "prod":
-        base, token, uid = (
-            settings.grafana_prod_base_url,
-            settings.grafana_api_key_prod,
-            settings.grafana_prod_loki_uid,
-        )
+        base, uid = settings.grafana_prod_base_url, settings.grafana_prod_loki_uid
     else:  # stag + dev share the nonprod instance
-        base, token, uid = (
-            settings.grafana_stag_base_url,
-            settings.grafana_api_key_stag,
-            settings.grafana_stag_loki_uid,
-        )
-    if not base or not (token or (settings.grafana_sa_kr or "").strip()):
+        base, uid = settings.grafana_stag_base_url, settings.grafana_stag_loki_uid
+    if not base or not (settings.grafana_sa_kr or "").strip():
         bucket = "prod" if e == "prod" else "stag"
         raise RuntimeError(
-            f"Grafana {bucket} chưa cấu hình "
-            f"(GRAFANA_SA_KR hoặc GRAFANA_API_KEY_* / GRAFANA_*_BASE_URL)."
+            f"Grafana {bucket} chưa cấu hình (GRAFANA_SA_KR / GRAFANA_*_BASE_URL)."
         )
-    return base.rstrip("/"), token, uid, e
+    return base.rstrip("/"), uid, e
 
 
 _REL_RE = re.compile(r"^now(?:-(\d+)([smhdw]))?$")
@@ -103,20 +95,13 @@ def _to_ns(expr: str) -> str:
     return str(int(dt.timestamp() * 1_000_000_000))
 
 
-def _headers(token: str) -> dict[str, str]:
-    # When the SA basic-auth credential is set we authenticate via `auth=` (see
-    # `_basic_auth`) and omit the Bearer header entirely — the per-env glsa_ tokens
-    # were revoked (401), so Bearer is only the legacy fallback when no SA is set.
-    h = {"Accept": "application/json"}
-    if not (settings.grafana_sa_kr or "").strip():
-        h["Authorization"] = f"Bearer {token}"
-    return h
+_HEADERS = {"Accept": "application/json"}
 
 
 def _basic_auth() -> httpx.BasicAuth | None:
-    """SA basic-auth (one credential, works on both nonprod + prod-kr). Returns
-    None when unset so httpx sends no auth and `_headers` supplies the Bearer
-    fallback instead."""
+    """SA basic-auth (one credential, works on both nonprod + prod-kr). `_env_conf`
+    guarantees the credential is set before any request, so this returns None only
+    in defensive paths."""
     sa = (settings.grafana_sa_kr or "").strip()
     return httpx.BasicAuth(settings.grafana_sa_user, sa) if sa else None
 
@@ -238,7 +223,7 @@ async def search_logs(
     query, err = _resolve_query(query, service, log_filter)
     if err:
         return err
-    base, token, uid, env_token = _env_conf(env)
+    base, uid, env_token = _env_conf(env)
     query = query.replace("{env}", env_token)  # selector templates use {env} → kr-<env>/...
     uid = (datasource_uid or uid or "").strip()
     if not uid:
@@ -267,7 +252,7 @@ async def search_logs(
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.get(
             _proxy_url(base, uid, "/loki/api/v1/query_range"),
-            headers=_headers(token),
+            headers=_HEADERS,
             params=params,
             auth=_basic_auth(),
         )
@@ -284,10 +269,10 @@ async def search_logs(
 
 
 async def list_datasources(env: str = "stag") -> ToolResult:
-    base, token, _, _ = _env_conf(env)
+    base, _, _ = _env_conf(env)
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(
-            f"{base}/api/datasources", headers=_headers(token), auth=_basic_auth()
+            f"{base}/api/datasources", headers=_HEADERS, auth=_basic_auth()
         )
         r.raise_for_status()
         items = r.json()
@@ -317,7 +302,7 @@ async def count_errors(
     failure separately from a real zero).
     """
     try:
-        base, token, uid, env_token = _env_conf(env)
+        base, uid, env_token = _env_conf(env)
     except (RuntimeError, ValueError):
         return None
     uid = (uid or "").strip()
@@ -329,7 +314,7 @@ async def count_errors(
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.get(
                 _proxy_url(base, uid, "/loki/api/v1/query"),
-                headers=_headers(token),
+                headers=_HEADERS,
                 params={"query": metric, "time": _to_ns("now")},
                 auth=_basic_auth(),
             )

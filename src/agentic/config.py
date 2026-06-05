@@ -26,16 +26,13 @@ class Settings(BaseSettings):
     github_default_repo: str = Field(default="", alias="GITHUB_DEFAULT_REPO")
     github_username: str = Field(default="", alias="GITHUB_USERNAME")
 
-    grafana_api_key_stag: str = Field(default="", alias="GRAFANA_API_KEY_STAG")
     grafana_stag_base_url: str = Field(default="", alias="GRAFANA_STAG_BASE_URL")
     grafana_stag_loki_uid: str = Field(default="", alias="GRAFANA_STAG_LOKI_UID")
-    grafana_api_key_prod: str = Field(default="", alias="GRAFANA_API_KEY_PROD")
     grafana_prod_base_url: str = Field(default="", alias="GRAFANA_PROD_BASE_URL")
     grafana_prod_loki_uid: str = Field(default="", alias="GRAFANA_PROD_LOKI_UID")
-    # Service-account basic-auth credential (devops-issued). One credential works on
-    # BOTH the nonprod and prod-kr Grafana instances, so when set it supersedes the
-    # per-env glsa_ Bearer tokens above (which were revoked → 401). User defaults to
-    # the SA name; only the password lives in GRAFANA_SA_KR.
+    # Service-account basic-auth credential (devops-issued) — the sole Grafana auth.
+    # One credential works on BOTH the nonprod and prod-kr instances. User defaults
+    # to the SA name; only the password lives in GRAFANA_SA_KR.
     grafana_sa_kr: str = Field(default="", alias="GRAFANA_SA_KR")
     grafana_sa_user: str = Field(default="grafana-sa-kr", alias="GRAFANA_SA_USER")
 
