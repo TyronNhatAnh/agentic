@@ -33,3 +33,23 @@ def test_format_messages_keeps_long_analysis_for_reuse():
     assert "ggx-kr-da-api" in out
     assert "message cắt bớt" not in out
     assert len(out) >= len(analysis)
+
+
+def test_tool_label_strips_mcp_prefix():
+    # MCP tools surface as mcp__agentic__<verb>; the progress line shows the verb
+    # only. Native tools (Bash/Read/Task) pass through unchanged.
+    from agentic.sdk.brain_session import _tool_label
+
+    assert _tool_label("mcp__agentic__grafana_query_loki") == "grafana_query_loki"
+    assert _tool_label("Bash") == "Bash"
+    assert _tool_label("") == "tool"
+
+
+def test_tool_progress_renders_only_after_first_tool():
+    # Empty before any tool fires so the placeholder keeps its initial text until
+    # there's something real to report; step count only once it's >1.
+    from agentic.sdk.brain_session import _tool_progress
+
+    assert _tool_progress("", 0) == ""
+    assert _tool_progress("grafana_query_loki", 1) == "🔧 đang chạy `grafana_query_loki`"
+    assert _tool_progress("Bash", 3) == "🔧 đang chạy `Bash` · 3 bước"

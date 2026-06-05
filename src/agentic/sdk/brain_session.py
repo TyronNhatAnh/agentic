@@ -203,7 +203,9 @@ async def run_brain_session(
 
     text_parts: list[str] = []
     last_edit = 0.0
+    last_rendered = ""
     tool_use_count = 0
+    last_tool_label = ""
     result_msg: ResultMessage | None = None
     error: str | None = None
 
@@ -225,15 +227,27 @@ async def run_brain_session(
                             text_parts.append(block.text)
                         elif isinstance(block, ToolUseBlock):
                             tool_use_count += 1
+                            last_tool_label = _tool_label(block.name)
                     now = time.monotonic()
-                    if text_parts and now - last_edit >= _STREAM_EDIT_INTERVAL_S:
+                    # Stream the brain's prose once it starts; until then surface
+                    # tool activity so the placeholder reflects progress instead of
+                    # freezing on the initial "Đang xử lý…" for the whole tool phase
+                    # (the brain front-loads Loki/GitHub/git calls before writing).
+                    view = "".join(text_parts) or _tool_progress(
+                        last_tool_label, tool_use_count
+                    )
+                    if (
+                        view
+                        and view != last_rendered
+                        and now - last_edit >= _STREAM_EDIT_INTERVAL_S
+                    ):
                         cooldown = await _safe_placeholder_update(
-                            slack_client, channel_id, placeholder_ts,
-                            "".join(text_parts),
+                            slack_client, channel_id, placeholder_ts, view,
                         )
                         # On a Slack 429 push the next allowed edit out by Retry-After
                         # so the stream stops hammering chat.update.
                         last_edit = now + cooldown
+                        last_rendered = view
                 elif isinstance(msg, ResultMessage):
                     result_msg = msg
                     break
@@ -343,6 +357,24 @@ def _compose_user_message(
         parts.append("## Workspace hiện tại\n" + workspace_hint.strip())
     parts.append("---\n" + user_text)
     return "\n\n".join(parts)
+
+
+def _tool_label(name: str) -> str:
+    """Human-readable tool name for the progress line. MCP tools arrive as
+    ``mcp__agentic__grafana_query_loki`` — keep only the verb; native tools
+    (Bash/Read/Task) pass through unchanged."""
+    return name.rsplit("__", 1)[-1] if name else "tool"
+
+
+def _tool_progress(tool_label: str, count: int) -> str:
+    """Progress line shown while the brain is calling tools and hasn't emitted
+    prose yet. Empty before the first tool, so the placeholder keeps the initial
+    text until there's something real to report. The "đang xử lý…" marker is
+    added by _safe_placeholder_update, so it's not repeated here."""
+    if not tool_label:
+        return ""
+    steps = f" · {count} bước" if count > 1 else ""
+    return f"🔧 đang chạy `{tool_label}`{steps}"
 
 
 async def _safe_placeholder_update(
