@@ -53,6 +53,34 @@ def test_short_field_within_cap_survives():
     assert "…[truncated]" not in out
 
 
+def _multi_payload(n: int, base_ns: int = 1716711974000000000):
+    # n rows, 1s apart, newest = base_ns + (n-1)s
+    return {
+        "data": {
+            "resultType": "streams",
+            "result": [
+                {
+                    "stream": {"app": "payment-service", "detected_level": "warn"},
+                    "values": [[str(base_ns + i * 1_000_000_000), f"line {i}"] for i in range(n)],
+                }
+            ],
+        }
+    }
+
+
+def test_capped_result_warns_and_shows_window():
+    # exactly `limit` rows back => clamped; brain must be told it's truncated + the covered span
+    out = grafana._format_streams(_multi_payload(5), query='{job="x"}', env="prod", limit=5)
+    assert "Đạt cap 5 dòng" in out
+    assert "phủ" in out and "→" in out  # covered window surfaced in header
+
+
+def test_uncapped_result_no_warning():
+    out = grafana._format_streams(_multi_payload(3), query='{job="x"}', env="prod", limit=50)
+    assert "Đạt cap" not in out
+    assert "phủ" in out  # window still shown, just no truncation warning
+
+
 _SVC = {"name": "payment-service", "loki_selector": '{job="kr-{env}/argo-ggx-kr-payment-service"}'}
 
 

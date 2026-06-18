@@ -145,11 +145,26 @@ def _format_streams(payload: dict, *, query: str, env: str, limit: int) -> str:
 
     entries.sort(key=lambda e: e[0], reverse=True)  # newest first
     shown = entries[:limit]
+    # Loki receives `limit` (see search_logs) and returns at most that many rows, so
+    # len(entries) == limit signals the result was clamped — there were almost certainly
+    # more matches outside the returned slice. With direction=backward those rows are the
+    # NEWEST, so the slice covers only the tail of [since, until]; the rest was never seen.
+    # Surface both facts: a silent count ("200 dòng") reads as "scanned everything" and
+    # makes the brain mark the unscanned span UNKNOWN or guess at time-chunking.
+    covered = f"{_fmt_ts(shown[-1][0])}→{_fmt_ts(shown[0][0])} UTC"
+    capped = len(entries) >= limit
     head = (
         f"*Grafana/Loki `{env}`* — `{query}` "
-        f"({len(entries)} dòng, hiển thị {len(shown)}):"
+        f"({len(shown)} dòng, phủ {covered}):"
     )
     lines = [head]
+    if capped:
+        lines.append(
+            f"⚠️ Đạt cap {limit} dòng — direction=backward nên đây là {limit} dòng MỚI NHẤT, "
+            f"chỉ phủ {covered}; phần còn lại của window CHƯA được quét. "
+            "Thu hẹp filter để loại noise volume cao (vd `!= \"...\"`), giảm window, "
+            "hoặc dùng count_over_time/metric query — đừng tăng limit mù (mỗi dòng nằm lại transcript)."
+        )
     for ts_ns, labels, line in shown:
         svc = labels.get("app") or labels.get("service") or labels.get("container") or ""
         lvl = labels.get("level") or labels.get("detected_level") or ""
