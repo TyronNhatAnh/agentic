@@ -232,7 +232,19 @@ async def _fetch_thread_history(
             channel=channel, ts=thread_ts, limit=limit
         )
     except Exception as e:
-        log.warning("conversations_replies failed for %s: %s", thread_ts, e)
+        # On a status-200 ok:false (missing_scope / not_in_channel / etc.) the
+        # generic SlackApiError string hides the cause — surface response.error
+        # (+ needed/provided for scope errors) so the real reason is visible.
+        resp_err = getattr(getattr(e, "response", None), "data", None) or {}
+        if not isinstance(resp_err, dict):
+            resp_err = {}
+        detail = resp_err.get("error") or str(e)
+        scope = ""
+        if resp_err.get("needed") or resp_err.get("provided"):
+            scope = f" (needed={resp_err.get('needed')} provided={resp_err.get('provided')})"
+        log.warning(
+            "conversations_replies failed for %s: %s%s", thread_ts, detail, scope
+        )
         return []
     try:
         current_ts_f = float(current_ts)
