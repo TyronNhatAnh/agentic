@@ -1,3 +1,5 @@
+import re
+
 import httpx
 
 from ..config import settings
@@ -5,6 +7,24 @@ from .result import ToolResult, classify_exception
 
 
 # ---------- helpers ----------
+
+# A Jira key (PROJ-123) possibly embedded in a browse URL, Slack-wrapped <url>,
+# or surrounding prose. We extract it so callers can pass a pasted link.
+_KEY_RE = re.compile(r"[A-Z][A-Z0-9]+-\d+", re.IGNORECASE)
+
+
+def _issue_key(raw: str) -> str:
+    """Normalize a user/brain-supplied issue reference to a bare key.
+
+    Accepts a bare ``ABC-123`` or anything containing one (e.g.
+    ``https://x.atlassian.net/browse/ABC-123``). Falls back to the stripped
+    input when no key is found, so a bad value surfaces a clear Jira NOT_FOUND
+    instead of a silent wrong lookup."""
+    if not raw:
+        return raw
+    m = _KEY_RE.search(raw)
+    return m.group(0).upper() if m else raw.strip()
+
 
 def _base() -> str:
     if not settings.jira_base_url:
@@ -130,6 +150,7 @@ async def list_project_in_progress(project: str | None = None) -> ToolResult:
 
 
 async def get_issue(key: str) -> ToolResult:
+    key = _issue_key(key)
     async with _client() as c:
         r = await c.get(
             f"{_base()}/rest/api/3/issue/{key}",
@@ -291,6 +312,40 @@ async def comment_issue(key: str, body: str) -> ToolResult:
     return ToolResult.success(f"✅ Đã comment <{_browse_url(key)}|{key}>")
 
 
+async def get_comments(key: str, limit: int = 5) -> ToolResult:
+    """Last `limit` (default 5) comments on an issue, oldest→newest for reading.
+
+    Accepts a key or a browse URL. The Jira `comment` field is not fetched by
+    `get_issue` (keeps that response lean), so this is the dedicated read path."""
+    key = _issue_key(key)
+    limit = max(1, min(limit, 20))
+    async with _client() as c:
+        r = await c.get(
+            f"{_base()}/rest/api/3/issue/{key}/comment",
+            params={"orderBy": "-created", "maxResults": limit},
+        )
+        r.raise_for_status()
+        data = r.json()
+    comments = data.get("comments") or []
+    if not comments:
+        return ToolResult.success(f"*<{_browse_url(key)}|{key}>* — chưa có comment nào.")
+    total = data.get("total", len(comments))
+    # orderBy=-created returns newest-first; reverse so the brain reads in order.
+    shown = list(reversed(comments))
+    header = f"*<{_browse_url(key)}|{key}>* — {len(shown)} comment gần nhất"
+    if total > len(shown):
+        header += f" (tổng {total})"
+    lines = [header + ":"]
+    for cm in shown:
+        author = (cm.get("author") or {}).get("displayName") or "?"
+        when = (cm.get("created") or "")[:10]
+        text = _adf_to_text(cm.get("body")).strip()
+        if len(text) > 1500:
+            text = text[:1450] + "\n…[comment cắt bớt]"
+        lines.append(f"\n• *{author}* ({when}):\n{text}")
+    return ToolResult.success("\n".join(lines))
+
+
 # ---------- dispatch ----------
 
 ACTION_HANDLERS = {
@@ -299,6 +354,7 @@ ACTION_HANDLERS = {
     "jira.list_my_sprint":            lambda p: list_my_sprint(p.get("status")),
     "jira.list_project_in_progress":  lambda p: list_project_in_progress(p.get("project")),
     "jira.get_issue":                 lambda p: get_issue(p["key"]),
+    "jira.get_comments":              lambda p: get_comments(p["key"], p.get("limit", 5)),
     "jira.search":                    lambda p: search_jql(p["jql"], p.get("max_results", 20),
                                                            p.get("kind", "Kết quả")),
     "jira.create_issue":              lambda p: create_issue(p["summary"], p.get("description", ""),

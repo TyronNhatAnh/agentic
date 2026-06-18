@@ -522,6 +522,30 @@ async def jira_get_issue(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "jira_get_comments",
+    "Read the latest comments on a Jira issue (default 5). Accepts a key "
+    "(ABC-123) or a browse URL. Use when the user asks about discussion/comments "
+    "on a ticket — get_issue returns only the description, not comments.",
+    {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string"},
+            "limit": {
+                "type": "integer",
+                "description": "How many recent comments to fetch (default 5, max 20).",
+            },
+        },
+        "required": ["key"],
+    },
+)
+async def jira_get_comments(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.get_comments(args["key"], args.get("limit", 5)),
+        retryable_read=True, service="Jira",
+    )
+
+
+@tool(
     "jira_search",
     "Run a JQL search. Use full Jira JQL in `jql`.",
     {
@@ -948,9 +972,9 @@ _ALL_TOOLS = [
     github_list_my_prs, github_list_prs, github_list_issues,
     github_list_notifications, github_search,
     github_get_pr, github_get_pr_diff,
-    # jira (11)
+    # jira (12)
     jira_list_my_issues, jira_list_my_in_progress, jira_list_my_sprint,
-    jira_list_project_in_progress, jira_get_issue, jira_search,
+    jira_list_project_in_progress, jira_get_issue, jira_get_comments, jira_search,
     jira_create_issue, jira_comment_issue, jira_assign_issue,
     jira_list_transitions, jira_transition_issue,
     # registry (1)
