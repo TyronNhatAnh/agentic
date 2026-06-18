@@ -173,16 +173,14 @@ REVAMP_LEGACY_REPO=/abs/path/da-api-legacy   # repo Ruby cũ, read-only, archaeo
 REVAMP_TARGET_SERVICE=da-api-v2   # tên service (trong registry) repo đích
 REVAMP_MODULE_CAP=40
 
-# MariaDB read-only cho introspection schema hiện tại (schema.rb đã cũ).
-# Trỏ vào clone staging LOCAL, KHÔNG bao giờ prod, dùng grant SELECT-only.
-# Host trống = tool db_query tắt.
-REVAMP_DB_HOST=127.0.0.1
-REVAMP_DB_PORT=3306
-REVAMP_DB_USER=
-REVAMP_DB_PASSWORD=
-REVAMP_DB_NAME=
-REVAMP_DB_ROW_CAP=200
-REVAMP_DB_TIMEOUT_S=10
+# Read-only introspection schema hiện tại (schema.rb đã cũ) chạy qua API debug của
+# ggx-kr-order-service (TEMPORARY, staging only — DB staging nằm sau VPN, host bot
+# không tới được). Trống base URL/token = tool db_query tắt. Endpoint chỉ tồn tại
+# khi service chạy non-prod — KHÔNG bao giờ trỏ vào prod.
+ORDER_DEBUG_BASE_URL=https://<staging-host>
+ORDER_DEBUG_ADMIN_TOKEN=          # admin accessToken (role AdminUser)
+ORDER_DEBUG_ROW_CAP=200
+ORDER_DEBUG_TIMEOUT_S=20
 REVAMP_COMMON_MIGRATIONS_DIR=/abs/path/common-services/db/migrate
 ```
 

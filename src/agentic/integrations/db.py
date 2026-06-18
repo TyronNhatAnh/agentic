@@ -1,21 +1,24 @@
-"""Read-only MariaDB access for the revamp archaeologist.
+"""Read-only DB access for the revamp archaeologist via the order-service debug API.
 
-Why this exists: the legacy da-api `db/schema.rb` is outdated, and a chunk of the
-app's behavior is driven by *config rows* that live only in the database — neither
-is recoverable from source. So archaeology needs to see the live schema (via
-`information_schema`) and read config tables. The trust boundary is deliberate:
-point ``REVAMP_DB_*`` at a LOCAL staging clone with a SELECT-only grant — never
-prod, never a write-capable user.
+Why this exists: the legacy `db/schema.rb` is outdated and a chunk of behavior is
+driven by *config rows* that live only in the database — neither is recoverable
+from source. The archaeologist needs the live schema + config rows.
 
-Safety is layered, Python being the boundary (not the model):
-1. Statement guard — only a single read-only statement (SELECT / SHOW / DESCRIBE /
-   EXPLAIN); anything mutating or multi-statement is rejected before it reaches the
-   server.
-2. ``SET TRANSACTION READ ONLY`` + ``max_statement_time`` on the session.
-3. Row cap — a bare SELECT gets a ``LIMIT`` appended so one query can't dump a table.
+The staging DB sits behind a VPN the bot host can't reach, so the old direct
+MariaDB connection was unusable. We now go through ``ggx-kr-order-service``'s
+``POST /api/v1/admin/orders/debug/query`` admin endpoint instead — a TEMPORARY,
+staging-only inspector that runs one read-only statement against the read replica
+and returns ``{"rowCount", "rows"}``. The endpoint only exists when that service's
+``APP_ENV != prod`` (prod → 403/404), so this can never hit production.
 
-A read-only DB grant should still be used; these are defense-in-depth, not a
-substitute for least-privilege credentials.
+Safety is layered — the server validates (allowed prefixes, banned DML keywords,
+single statement, LIMIT 1000, 15s timeout, audit log), and Python adds a client-side
+guard so an obviously-bad statement fails fast without a network round-trip / audit
+entry:
+1. Statement guard — only a single read-only statement (SELECT / WITH / SHOW /
+   DESCRIBE / EXPLAIN); anything mutating or multi-statement is rejected locally.
+2. Row cap — a bare SELECT gets a ``LIMIT`` appended (stricter than the server's
+   1000) so one query can't bloat the transcript.
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ import logging
 import re
 from datetime import date, datetime
 from decimal import Decimal
+
+import httpx
 
 from ..config import settings
 from .result import ToolResult
@@ -89,67 +94,94 @@ def _jsonable(v):
     return v
 
 
-def _render(safe_sql: str, rows: list[dict]) -> str:
+def _render(safe_sql: str, rows: list[dict], row_count: int | None = None) -> str:
     """A compact, unambiguous text rendering for the model: a header + JSON rows.
     ``display()`` returns a success string verbatim, so this is what the agent
     reads (a dict success would be swallowed to its `message` key)."""
     clean = [{k: _jsonable(v) for k, v in r.items()} for r in rows]
     body = json.dumps(clean, ensure_ascii=False, indent=2)
-    return f"-- {safe_sql}\n-- {len(rows)} row(s)\n{body}"
+    n = len(rows) if row_count is None else row_count
+    return f"-- {safe_sql}\n-- {n} row(s)\n{body}"
+
+
+_ENDPOINT = "/api/v1/admin/orders/debug/query"
 
 
 def _configured() -> bool:
-    return bool(settings.revamp_db_host and settings.revamp_db_name)
+    return bool(settings.order_debug_base_url and settings.order_debug_admin_token)
+
+
+def _map_http_error(status: int, body: str) -> ToolResult:
+    """Translate the debug-API HTTP status into a user-facing ToolResult.
+
+    The server returns short bodies (e.g. ``accessToken``, ``PerMissionDenied``,
+    ``only a single read-only query is allowed``, or a raw MySQL error); we relay a
+    truncated form. AUTH/VALIDATION/CONFIG are terminal (no retry — a 400/401 won't
+    pass on a second identical call); 5xx is transient.
+    """
+    snippet = (body or "").strip()[:300]
+    if status in (401, 403):
+        return ToolResult.failure(
+            "AUTH",
+            f"Debug query API {status}: {snippet or 'token hết hạn / không có quyền AdminUser'}.",
+        )
+    if status == 404:
+        return ToolResult.failure(
+            "CONFIG",
+            "Debug query API 404: route không tồn tại — endpoint chỉ có khi service "
+            "chạy non-prod. Kiểm tra ORDER_DEBUG_BASE_URL trỏ đúng staging.",
+        )
+    if status == 400:
+        return ToolResult.failure(
+            "VALIDATION", f"Debug query API từ chối: {snippet or 'query không hợp lệ'}."
+        )
+    return ToolResult.failure(
+        "SERVER", f"Debug query API {status}: {snippet}", retryable=status >= 500
+    )
 
 
 async def query(sql: str) -> ToolResult:
-    """Run one read-only statement against the configured staging clone."""
+    """Run one read-only statement against the staging read replica via the
+    order-service debug-query admin API."""
     if not _configured():
         return ToolResult.failure(
             "CONFIG",
-            "Chưa cấu hình REVAMP_DB_* (host/name). Trỏ vào staging clone local "
-            "read-only rồi thử lại.",
+            "Chưa cấu hình ORDER_DEBUG_BASE_URL / ORDER_DEBUG_ADMIN_TOKEN. "
+            "Set host staging + admin token (role AdminUser) rồi thử lại.",
         )
-    safe, err = guard_sql(sql, row_cap=settings.revamp_db_row_cap)
+    safe, err = guard_sql(sql, row_cap=settings.order_debug_row_cap)
     if err:
         return err
 
+    url = settings.order_debug_base_url.rstrip("/") + _ENDPOINT
+    headers = {
+        "Authorization": f"Bearer {settings.order_debug_admin_token}",
+        "Content-Type": "application/json",
+    }
     try:
-        import aiomysql  # imported lazily so the bot runs without the driver installed
-    except ImportError:
+        async with httpx.AsyncClient(timeout=settings.order_debug_timeout_s) as client:
+            r = await client.post(url, headers=headers, json={"query": safe})
+    except httpx.TimeoutException:
         return ToolResult.failure(
-            "CONFIG", "Thiếu driver `aiomysql` — chạy `make install` lại."
+            "TIMEOUT",
+            f"Debug query API timeout (>{settings.order_debug_timeout_s}s). "
+            "Câu có thể quá nặng — thêm filter/LIMIT.",
+            retryable=True,
         )
-
-    conn = None
-    try:
-        conn = await aiomysql.connect(
-            host=settings.revamp_db_host,
-            port=settings.revamp_db_port,
-            user=settings.revamp_db_user,
-            password=settings.revamp_db_password,
-            db=settings.revamp_db_name,
-            connect_timeout=settings.revamp_db_timeout_s,
-            autocommit=True,
-        )
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            # Defense-in-depth: read-only session + per-statement time cap. Wrapped
-            # because not every MariaDB build/grant exposes these (best-effort).
-            for guard in (
-                f"SET SESSION max_statement_time={int(settings.revamp_db_timeout_s)}",
-                "SET SESSION TRANSACTION READ ONLY",
-            ):
-                try:
-                    await cur.execute(guard)
-                except Exception:  # noqa: BLE001 — guard is best-effort
-                    log.debug("revamp db session guard skipped: %s", guard)
-            await cur.execute(safe)
-            rows = await cur.fetchall()
-        return ToolResult.success(_render(safe, list(rows or [])))
-    except Exception as e:  # noqa: BLE001 — boundary; map to a user-facing code
+    except httpx.HTTPError as e:  # connect/transport errors
         msg = str(e).split("\n", 1)[0]
-        log.warning("revamp db_query failed: %s", msg)
-        return ToolResult.failure("SERVER", f"DB query lỗi: {msg}", retryable=True)
-    finally:
-        if conn is not None:
-            conn.close()
+        log.warning("db_query http error: %s", msg)
+        return ToolResult.failure("NETWORK", f"Gọi debug query API lỗi mạng: {msg}", retryable=True)
+
+    if r.status_code != 200:
+        return _map_http_error(r.status_code, r.text)
+
+    try:
+        payload = r.json()
+    except ValueError:
+        return ToolResult.failure(
+            "SERVER", f"Response không phải JSON: {r.text[:300]}", retryable=True
+        )
+    rows = list(payload.get("rows") or [])
+    row_count = payload.get("rowCount", len(rows))
+    return ToolResult.success(_render(safe, rows, row_count))

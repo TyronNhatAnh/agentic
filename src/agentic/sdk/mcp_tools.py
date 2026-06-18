@@ -889,22 +889,22 @@ async def grafana_list_datasources(args: dict[str, Any]) -> dict[str, Any]:
 
 
 # ============================================================================
-# Revamp DB (1) — read-only MariaDB introspection for the archaeologist
+# Revamp DB (1) — read-only introspection via the order-service debug API
 # ============================================================================
 
 @tool(
     "db_query",
     (
-        "Run ONE read-only SQL statement against the revamp legacy DB (a local "
-        "MariaDB staging clone) and return the rows. Use this for the *current* "
-        "schema and config-in-DB values — the legacy `db/schema.rb` is outdated, "
-        "live introspection is the source of truth. "
-        "Allowed: SELECT / SHOW / DESCRIBE / EXPLAIN / WITH only; mutations and "
-        "multi-statements are rejected. Examples: "
-        "`SHOW TABLES`, `DESCRIBE orders`, "
-        "`SELECT column_name, data_type FROM information_schema.columns "
-        "WHERE table_name='orders'`, `SELECT * FROM feature_flags`. "
-        "A bare SELECT without LIMIT is capped automatically. Read-only — no confirm."
+        "Run ONE read-only SQL statement against the ggx-kr-order-service STAGING "
+        "read replica via its admin debug-query API and return the rows. Use this "
+        "for the *current* schema and config-in-DB values — live introspection is "
+        "the source of truth, the legacy `db/schema.rb` is stale. "
+        "Allowed: SELECT / WITH / SHOW / DESCRIBE / EXPLAIN only; mutations, "
+        "multi-statements and file access are rejected (client + server guard). "
+        "Examples: `SHOW CREATE TABLE orders`, `DESCRIBE orders`, "
+        "`SELECT id, status FROM orders WHERE user_id=12345`. "
+        "A bare SELECT without LIMIT is capped automatically. Staging read replica, "
+        "read-only — no confirm. (Temporary tool — staging only.)"
     ),
     {
         "type": "object",

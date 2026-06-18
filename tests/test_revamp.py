@@ -384,8 +384,93 @@ def test_guard_strips_trailing_semicolon():
 
 
 async def test_query_returns_config_error_when_unconfigured(monkeypatch):
-    monkeypatch.setattr(db_int.settings, "revamp_db_host", "", raising=False)
-    monkeypatch.setattr(db_int.settings, "revamp_db_name", "", raising=False)
+    monkeypatch.setattr(db_int.settings, "order_debug_base_url", "", raising=False)
+    monkeypatch.setattr(db_int.settings, "order_debug_admin_token", "", raising=False)
     res = await db_int.query("SELECT 1")
     assert not res.ok
     assert res.error_code == "CONFIG"
+
+
+# --------------------------------------------------------------------------- #
+# db_query HTTP path (order-service debug API) — fake httpx transport
+# --------------------------------------------------------------------------- #
+
+
+class _DQResp:
+    def __init__(self, status_code, json_data=None, text=""):
+        self.status_code = status_code
+        self._json = json_data
+        self.text = text
+
+    def json(self):
+        if self._json is None:
+            raise ValueError("no json")
+        return self._json
+
+
+class _DQClient:
+    """Stands in for httpx.AsyncClient: captures the POST and returns a canned resp."""
+
+    def __init__(self, resp, capture):
+        self._resp = resp
+        self._capture = capture
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None):
+        self._capture.update(url=url, headers=headers, json=json)
+        return self._resp
+
+
+def _configure_debug_api(monkeypatch):
+    monkeypatch.setattr(db_int.settings, "order_debug_base_url", "https://stg.example/", raising=False)
+    monkeypatch.setattr(db_int.settings, "order_debug_admin_token", "tok123", raising=False)
+    monkeypatch.setattr(db_int.settings, "order_debug_row_cap", 200, raising=False)
+    monkeypatch.setattr(db_int.settings, "order_debug_timeout_s", 20, raising=False)
+
+
+def _install_fake_client(monkeypatch, resp):
+    capture: dict = {}
+    monkeypatch.setattr(db_int.httpx, "AsyncClient", lambda *a, **k: _DQClient(resp, capture))
+    return capture
+
+
+async def test_query_success_posts_query_and_renders_rows(monkeypatch):
+    _configure_debug_api(monkeypatch)
+    resp = _DQResp(200, {"rowCount": 2, "rows": [{"id": 1, "status": "completed"}, {"id": 2, "status": "cancelled"}]})
+    capture = _install_fake_client(monkeypatch, resp)
+
+    res = await db_int.query("SELECT id, status FROM orders LIMIT 5")
+
+    assert res.ok
+    # request shape: endpoint, Bearer auth, {"query": ...} body
+    assert capture["url"] == "https://stg.example/api/v1/admin/orders/debug/query"
+    assert capture["headers"]["Authorization"] == "Bearer tok123"
+    assert capture["json"] == {"query": "SELECT id, status FROM orders LIMIT 5"}
+    out = res.display()
+    assert "2 row(s)" in out and "completed" in out
+
+
+async def test_query_appends_limit_before_posting(monkeypatch):
+    _configure_debug_api(monkeypatch)
+    capture = _install_fake_client(monkeypatch, _DQResp(200, {"rowCount": 0, "rows": []}))
+    await db_int.query("SELECT * FROM orders")
+    assert capture["json"]["query"] == "SELECT * FROM orders LIMIT 200"
+
+
+@pytest.mark.parametrize(
+    "status,code",
+    [(401, "AUTH"), (403, "AUTH"), (400, "VALIDATION"), (404, "CONFIG"), (500, "SERVER")],
+)
+async def test_query_maps_http_errors(monkeypatch, status, code):
+    _configure_debug_api(monkeypatch)
+    _install_fake_client(monkeypatch, _DQResp(status, text="boom"))
+    res = await db_int.query("SELECT 1")
+    assert not res.ok
+    assert res.error_code == code
+    # 5xx is transient (worth a retry); 4xx is terminal.
+    assert res.retryable is (status >= 500)
