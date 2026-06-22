@@ -1,39 +1,26 @@
-from agentic.slack_handlers import _chunks, _placeholder_for, _to_slack_mrkdwn
+from agentic.slack_handlers import (
+    _chunks,
+    _markdown_block,
+    _notify_text,
+    _placeholder_for,
+)
 
 
-def test_to_slack_mrkdwn_converts_common_github_markdown():
-    text = "**[review]**\n### ⛔ Blocking issues\n- **[critical]** `file.go:1` — bug"
+def test_markdown_block_passes_text_through_unchanged():
+    # Slack converts standard GFM server-side, so we send the brain's markdown
+    # verbatim — no local mrkdwn translation that previously dropped headings,
+    # tables, lists, etc.
+    text = "## Heading\n- **bold** item\n\n| a | b |\n|---|---|\n| 1 | 2 |"
 
-    out = _to_slack_mrkdwn(text)
+    blocks = _markdown_block(text)
 
-    assert out == "*[review]*\n⛔ Blocking issues\n- *[critical]* `file.go:1` — bug"
-
-
-def test_to_slack_mrkdwn_renders_table_as_code_block():
-    text = (
-        "Verdict:\n"
-        "| Claim | Status | Evidence |\n"
-        "|---|---|---|\n"
-        "| `LastStartAt` fence | **✅ ACCEPT** | command_repo.go |\n"
-        "trailing line"
-    )
-
-    out = _to_slack_mrkdwn(text)
-    lines = out.splitlines()
-
-    assert lines[0] == "Verdict:"
-    assert lines[1] == "```"
-    # separator row dropped; header + body aligned, inline md flattened
-    assert lines[2] == "Claim             | Status   | Evidence"
-    assert lines[3] == "LastStartAt fence | ✅ ACCEPT | command_repo.go"
-    assert lines[4] == "```"
-    assert lines[5] == "trailing line"
+    assert blocks == [{"type": "markdown", "text": text}]
 
 
-def test_to_slack_mrkdwn_converts_links():
-    out = _to_slack_mrkdwn("see [PR #1](https://github.com/o/r/pull/1) now")
-
-    assert out == "see <https://github.com/o/r/pull/1|PR #1> now"
+def test_notify_text_is_first_line_clipped():
+    assert _notify_text("first line\nsecond line") == "first line"
+    assert _notify_text("  \n  ") == "tin nhắn"
+    assert _notify_text("x" * 200) == "x" * 150
 
 
 def test_chunks_prefers_paragraph_boundaries():

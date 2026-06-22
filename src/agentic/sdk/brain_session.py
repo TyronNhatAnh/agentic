@@ -389,11 +389,20 @@ async def _safe_placeholder_update(
     snippet = text.strip()
     if not snippet:
         return 0.0
-    if len(snippet) > 3500:
-        snippet = snippet[:3400] + "\n…"
+    # Block Kit markdown blocks cap at 12,000 chars; leave headroom for suffix.
+    if len(snippet) > 11500:
+        snippet = snippet[:11400] + "\n…"
     snippet += _STREAM_SUFFIX
     try:
-        await client.chat_update(channel=channel, ts=ts, text=snippet)
+        # Render via a Block Kit markdown block so the streamed partial shows
+        # formatted (headings/lists/tables) instead of raw markdown; Slack
+        # converts standard markdown server-side. `text` is the notify fallback.
+        await client.chat_update(
+            channel=channel,
+            ts=ts,
+            text="⏳ đang xử lý…",
+            blocks=[{"type": "markdown", "text": snippet}],
+        )
         return 0.0
     except Exception as e:
         retry_after = _retry_after_seconds(e)

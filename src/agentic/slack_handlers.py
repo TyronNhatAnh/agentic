@@ -13,7 +13,9 @@ log = logging.getLogger(__name__)
 
 _MENTION_RE = re.compile(r"<@([A-Z0-9]+)>\s*")
 _BUSY_MSG = "⏳ Đang chạy job trước rồi, đợi xíu nha."
-_SLACK_CHUNK_LEN = 3500
+# Block Kit markdown blocks allow 12,000 chars cumulatively per payload; one
+# block per message, kept just under the cap to leave room for any suffix.
+_SLACK_CHUNK_LEN = 11800
 _CHANNEL_CACHE_TTL_S = 30 * 60  # 30 minutes — picks up renames within half an hour
 _USER_CACHE_TTL_S = 30 * 60
 # Hard ceiling on cache entries. Growth is naturally bounded by the workspace's
@@ -114,85 +116,23 @@ def _placeholder_for(text: str) -> str:
     return "⏳ Đang xử lý..."
 
 
-# A GFM table separator row, e.g. `|---|:--:|` (the line under the header).
-_TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
-# `[label](http://url)` — converted to Slack's `<url|label>` link syntax.
-_MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+def _markdown_block(text: str) -> list[dict]:
+    """Wrap text in a Block Kit ``markdown`` block. Slack converts standard
+    GitHub-flavoured markdown server-side — headings, ordered/nested lists,
+    tables, fenced code with syntax highlight, dividers, task lists — so we no
+    longer translate to legacy mrkdwn ourselves (which silently dropped most of
+    those). Verified working via chat.postMessage and chat.update for this app."""
+    return [{"type": "markdown", "text": text}]
 
 
-def _inline_mrkdwn(line: str) -> str:
-    """Inline GitHub-markdown → Slack-mrkdwn on a single non-table line."""
-    line = _MD_LINK_RE.sub(r"<\2|\1>", line)
-    line = re.sub(r"\*\*([^*\n]+)\*\*", r"*\1*", line)
-    line = re.sub(r"__([^_\n]+)__", r"*\1*", line)
-    line = re.sub(r"~~([^~\n]+)~~", r"~\1~", line)
-    return line
-
-
-def _strip_inline_md(cell: str) -> str:
-    """Flatten inline markup inside a table cell — Slack does not render mrkdwn
-    inside ``` code blocks, so `**x**`/`` `x` ``/links would otherwise show raw."""
-    cell = _MD_LINK_RE.sub(r"\1 (\2)", cell)
-    cell = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", cell)
-    cell = cell.replace("**", "").replace("`", "")
-    return cell.strip()
-
-
-def _split_table_row(line: str) -> list[str]:
-    s = line.strip()
-    if s.startswith("|"):
-        s = s[1:]
-    if s.endswith("|"):
-        s = s[:-1]
-    return [c.strip() for c in s.split("|")]
-
-
-def _render_table(rows: list[str]) -> list[str]:
-    """Render a markdown table (header + body lines, separator already dropped)
-    into a monospace code block so columns align on Slack, which has no tables."""
-    parsed = [[_strip_inline_md(c) for c in _split_table_row(r)] for r in rows]
-    ncol = max(len(r) for r in parsed)
-    for r in parsed:
-        r.extend([""] * (ncol - len(r)))
-    widths = [max(len(r[i]) for r in parsed) for i in range(ncol)]
-    out = ["```"]
-    for r in parsed:
-        out.append(" | ".join(r[i].ljust(widths[i]) for i in range(ncol)).rstrip())
-    out.append("```")
-    return out
-
-
-def _to_slack_mrkdwn(text: str) -> str:
-    src = text.splitlines()
-    out: list[str] = []
-    i, n = 0, len(src)
-    while i < n:
-        line = src[i]
-        # GFM table: a `|`-row immediately followed by a separator row. Collect
-        # the header + all following pipe rows and render as one code block.
-        if (
-            "|" in line
-            and i + 1 < n
-            and "|" in src[i + 1]
-            and _TABLE_SEP_RE.match(src[i + 1])
-        ):
-            block = [line]
-            j = i + 2
-            while j < n and "|" in src[j] and src[j].strip():
-                block.append(src[j])
-                j += 1
-            out.extend(_render_table(block))
-            i = j
-            continue
-        stripped = line.lstrip()
-        if stripped.startswith("#"):
-            prefix_len = len(line) - len(stripped)
-            hashes = len(stripped) - len(stripped.lstrip("#"))
-            if 1 <= hashes <= 6 and stripped[hashes:].startswith(" "):
-                line = line[:prefix_len] + stripped[hashes + 1 :]
-        out.append(_inline_mrkdwn(line))
-        i += 1
-    return "\n".join(out)
+def _notify_text(text: str) -> str:
+    """Short plaintext fallback for the `text` field when sending blocks. Slack
+    uses it for push/desktop notifications and accessibility; the visible body
+    comes from the markdown block."""
+    stripped = text.strip()
+    if not stripped:
+        return "tin nhắn"
+    return stripped.splitlines()[0][:150]
 
 
 def _chunks(text: str, limit: int = _SLACK_CHUNK_LEN) -> list[str]:
@@ -342,16 +282,19 @@ def register(
         )
 
         async def reply(msg: str) -> None:
-            msg = _to_slack_mrkdwn(msg)
             parts = _chunks(msg)
             await client.chat_update(
-                channel=channel, ts=placeholder["ts"], text=parts[0]
+                channel=channel,
+                ts=placeholder["ts"],
+                text=_notify_text(parts[0]),
+                blocks=_markdown_block(parts[0]),
             )
             for part in parts[1:]:
                 await client.chat_postMessage(
                     channel=channel,
                     thread_ts=thread_ts,
-                    text=part,
+                    text=_notify_text(part),
+                    blocks=_markdown_block(part),
                 )
 
         job = Job(
