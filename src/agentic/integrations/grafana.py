@@ -300,9 +300,20 @@ async def list_datasources(env: str = "stag") -> ToolResult:
     return ToolResult.success("\n".join(lines))
 
 
-# LogQL line filter that matches the common error/exception signatures. Kept in
-# one place so search and the monitor count the same set of lines.
-_ERROR_FILTER = '|~ "(?i)error|exception|fatal|panic|traceback|critical"'
+# LogQL line filter the health monitor counts with. It must match the *log level*,
+# not any line containing the substring "error" — the old `|~ "(?i)error|..."`
+# counted JSON response bodies with `"errors":null`, field names, etc. and inflated
+# prod counts ~100-5000x (driver-service: 14.7k matches, 3 real errors). Loki here
+# does NOT populate `detected_level` (verified: every stream returns <none>), so we
+# anchor to the level field across the three formats actually in prod:
+#   Go/JSON   {"level":"error"...}  — driver/order; user-service uses {"lvl":"error"}
+#   Ruby      E, [...] ERROR -- :   — da-api (also FATAL)
+#   Spring    <ts>  ERROR 7 --- [..] — payment (its 436 "errors" were all WARN/OTel)
+# Verified on prod 2026-06-22: driver 14694→3, payment 436→0, da-api 159→100 (real).
+_ERROR_FILTER = (
+    '|~ `"(level|lvl)":"(error|fatal|panic|dpanic|critical)"'
+    '|(ERROR|FATAL|PANIC|CRITICAL) (--|[0-9]+ ---)`'
+)
 
 
 async def count_errors(
