@@ -22,7 +22,9 @@ the bot). Timestamps follow the repo convention: UTC + VN(+7) + KST(+9).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -90,6 +92,59 @@ async def _check_service(name: str, selector: str) -> dict:
     return {"name": name, "count": count}
 
 
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+_NUM_RE = re.compile(r"\d+")
+# Strip the per-format log prefix so the hint shows the message, not boilerplate:
+#   Ruby/Rails:  E, [2026-... #68] ERROR -- :   Spring: 2026-...Z  WARN 7 --- [thread]
+_RUBY_PREFIX = re.compile(r"^[A-Z], \[[^\]]+\]\s*\w+\s*--\s*:\s*")
+_SPRING_PREFIX = re.compile(r"^[\d\-T:.Z]+\s+[A-Z]+\s+\d+\s+---\s+\[[^\]]*\]\s*")
+_REQ_ID = re.compile(r"^\[[0-9a-f][0-9a-f-]{7,}\]\s*", re.I)
+
+
+def _clean_line(line: str) -> str:
+    """Trim a raw log line to a short, readable hint. Strips the per-format envelope
+    (Ruby/Spring prefix, leading request-id) and, for Go JSON logs, surfaces the
+    human fields (msg/error/path/status) instead of the whole object."""
+    line = line.strip()
+    if line.startswith("{"):
+        try:
+            o = json.loads(line)
+            parts = [str(o[k]) for k in ("msg", "error", "path", "status") if o.get(k) not in (None, "")]
+            if parts:
+                line = " · ".join(parts)
+        except (ValueError, TypeError):
+            pass
+    else:
+        line = _SPRING_PREFIX.sub("", _RUBY_PREFIX.sub("", line))
+        line = _REQ_ID.sub("", line)
+    line = " ".join(line.split())  # collapse whitespace
+    return line[:160]
+
+
+def _signature(line: str) -> str:
+    """Normalize a line so near-identical errors (differing only in ids/numbers/times)
+    group together: strip UUIDs and digits."""
+    return _NUM_RE.sub("N", _UUID_RE.sub("<id>", line))[:200]
+
+
+def _summarize_errors(lines: list[str], max_groups: int = 3) -> list[str]:
+    """Group sampled error lines by signature and render `count× sample` for the top
+    groups. Counts are within the fetched sample (capped), so they are a hint, not the
+    authoritative total (which is the count column)."""
+    groups: dict[str, list] = {}  # signature -> [count, first_clean_sample]
+    for ln in lines:
+        sig = _signature(ln)
+        if sig not in groups:
+            sample = _clean_line(ln)
+            if not sample:  # e.g. a FATAL/PANIC line whose detail is on following lines
+                m = re.search(r"(FATAL|PANIC)", ln)
+                sample = f"{m.group(1)} (stacktrace ở dòng kế — dig bằng request id)" if m else ln[:80]
+            groups[sig] = [0, sample]
+        groups[sig][0] += 1
+    top = sorted(groups.values(), key=lambda g: g[0], reverse=True)[:max_groups]
+    return [f"{cnt}× {sample}" for cnt, sample in top]
+
+
 async def _check_health(name: str, url: str) -> dict:
     t0 = time.monotonic()
     try:
@@ -122,6 +177,7 @@ def _format(
     env: str,
     window: str,
     threshold: int,
+    samples: dict[str, list[str]] | None = None,
 ) -> tuple[str, bool]:
     """Build the Slack digest and decide whether it is notable enough to post."""
     counted = sorted(
@@ -142,9 +198,12 @@ def _format(
             detail = h["error"] or f"HTTP {h['status']}"
             lines.append(f"🔴 `{h['name']}` — {detail} ({h['url']})")
     if over:
+        samples = samples or {}
         lines.append(f"\n*Service vượt ngưỡng (≥ {threshold} log lỗi/{window}):*")
         for s in over:
             lines.append(f"🔴 `{s['name']}` — {s['count']} log lỗi")
+            for hint in samples.get(s["name"], []):
+                lines.append(f"      • `{hint}`")
 
     if notable:
         rest = [s for s in counted if 0 < s["count"] < threshold][:5]
@@ -185,12 +244,31 @@ async def run_check() -> tuple[str | None, bool]:
     health_results = (
         list(await asyncio.gather(*[_check_health(n, u) for n, u in healths])) if healths else []
     )
+    # Fetch error samples only for over-threshold services (so a healthy cycle stays
+    # cheap and we don't double-scan high-volume streams unnecessarily).
+    threshold = settings.monitor_error_threshold
+    sel_by_name = dict(svcs)
+    over_names = [s["name"] for s in svc_results if (s["count"] or 0) >= threshold]
+    samples: dict[str, list[str]] = {}
+    if over_names:
+        fetched = await asyncio.gather(
+            *[
+                grafana.sample_errors(
+                    sel_by_name[n], env=settings.monitor_env, window=settings.monitor_window
+                )
+                for n in over_names
+            ]
+        )
+        for name, lines in zip(over_names, fetched):
+            if lines:
+                samples[name] = _summarize_errors(lines)
     return _format(
         svc_results,
         health_results,
         env=settings.monitor_env,
         window=settings.monitor_window,
-        threshold=settings.monitor_error_threshold,
+        threshold=threshold,
+        samples=samples,
     )
 
 

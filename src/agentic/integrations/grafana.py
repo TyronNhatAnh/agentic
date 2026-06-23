@@ -372,6 +372,51 @@ async def count_errors(
         return None
 
 
+async def sample_errors(
+    selector: str, env: str = "prod", window: str = "1h", limit: int = 50
+) -> list[str] | None:
+    """Return the raw log lines matching `_ERROR_FILTER` for a selector over `window`,
+    newest first. Used by the health monitor to show *what* failed (not just a count).
+    Returns None if the query failed / Grafana isn't configured."""
+    try:
+        base, uid, env_token = _env_conf(env)
+    except (RuntimeError, ValueError):
+        return None
+    uid = (uid or "").strip()
+    if not uid:
+        return None
+    selector = selector.replace("{env}", env_token)
+    query = f"{selector} {_ERROR_FILTER}"
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.get(
+                _proxy_url(base, uid, "/loki/api/v1/query_range"),
+                headers=_HEADERS,
+                params={
+                    "query": query,
+                    "start": _to_ns(f"now-{window}"),
+                    "end": _to_ns("now"),
+                    "limit": str(max(1, min(int(limit), _MAX_LIMIT))),
+                    "direction": "backward",
+                },
+                auth=_basic_auth(),
+            )
+            r.raise_for_status()
+            payload = r.json()
+    except Exception as e:
+        log.warning("sample_errors failed for selector=%s env=%s: %r", selector, env, e)
+        return None
+    entries: list[tuple[int, str]] = []
+    for stream in (payload.get("data") or {}).get("result") or []:
+        for ts_ns, line in stream.get("values") or []:
+            try:
+                entries.append((int(ts_ns), line))
+            except (ValueError, TypeError):
+                continue
+    entries.sort(key=lambda e: e[0], reverse=True)
+    return [line for _, line in entries]
+
+
 # ---------- dispatch ----------
 
 ACTION_HANDLERS = {

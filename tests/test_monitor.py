@@ -62,10 +62,45 @@ async def test_run_check_aggregates_counts(monkeypatch) -> None:
     async def fake_count(selector, env, window):
         return 99
 
+    async def fake_sample(selector, env, window):
+        return ['{"level":"error","msg":"boom","status":500}'] * 3
+
     monkeypatch.setattr(monitor.grafana, "count_errors", fake_count)
+    monkeypatch.setattr(monitor.grafana, "sample_errors", fake_sample)
     text, notable = await monitor.run_check()
     assert notable is True
     assert "99 log lỗi" in text
+    # over-threshold service carries an inline error summary
+    assert "3× boom" in text
+
+
+def test_summarize_groups_across_formats() -> None:
+    lines = [
+        # Ruby/Rails 500s differing only in ids/timings — should collapse to one group
+        "I, [2026-06-23T01:39:10 #68] INFO -- : [827ce664-b0f7-4c96-8fca-eef159fb63da] Completed 500 Internal Server Error in 358ms",
+        "I, [2026-06-23T01:40:11 #70] INFO -- : [aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee] Completed 500 Internal Server Error in 12ms",
+        # Go JSON crash
+        '{"level":"error","msg":"db down","error":"timeout","status":503}',
+    ]
+    out = monitor._summarize_errors(lines)
+    assert any(h.startswith("2× Completed 500 Internal Server Error") for h in out)
+    assert any("db down · timeout" in h and h.startswith("1×") for h in out)
+    # the noisy Ruby prefix + request id are stripped from the hint
+    assert all("INFO -- :" not in h and "#68" not in h for h in out)
+
+
+def test_summarize_fatal_without_inline_message() -> None:
+    lines = ["F, [2026-06-23T01:36:30 #48] FATAL -- : [0ef06e17-c013-4ddb-afcb-fb0162b81ee0]"]
+    out = monitor._summarize_errors(lines)
+    assert out == ["1× FATAL (stacktrace ở dòng kế — dig bằng request id)"]
+
+
+def test_format_renders_samples_under_over_service() -> None:
+    svc = [{"name": "da-api", "count": 12}]
+    samples = {"da-api": ["11× Completed 500 Internal Server Error", "1× FATAL"]}
+    text, notable = monitor._format(svc, [], env="prod", window="1h", threshold=5, samples=samples)
+    assert "🔴 `da-api` — 12 log lỗi" in text
+    assert "11× Completed 500" in text
 
 
 @pytest.mark.asyncio
