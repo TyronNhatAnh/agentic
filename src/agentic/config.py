@@ -143,7 +143,9 @@ class Settings(BaseSettings):
     # Empty = every registered service that has a loki_selector; else a CSV of
     # service names/aliases to narrow the watch list.
     monitor_services: str = Field(default="", alias="MONITOR_SERVICES")
-    monitor_error_threshold: int = Field(default=20, alias="MONITOR_ERROR_THRESHOLD")
+    # 5xx/crash count over the window to alert on. Low because the filter now counts
+    # real server errors (HTTP 5xx + fatal/panic), not "error"-substring noise.
+    monitor_error_threshold: int = Field(default=5, alias="MONITOR_ERROR_THRESHOLD")
     # CSV of `name=url` (or bare `url`) HTTP endpoints to GET each cycle.
     monitor_health_urls: str = Field(default="", alias="MONITOR_HEALTH_URLS")
     monitor_always_post: bool = Field(default=False, alias="MONITOR_ALWAYS_POST")

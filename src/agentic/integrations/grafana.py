@@ -13,6 +13,7 @@ the `env` payload field selects which. Auth is a single SA basic-auth credential
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from datetime import datetime, timezone
@@ -22,6 +23,8 @@ import httpx
 from ..config import settings
 from ..store import resolve_service
 from .result import ToolResult, classify_exception
+
+log = logging.getLogger(__name__)
 
 # Loki caps; keep requests bounded so a broad query can't dump unbounded logs.
 _MAX_LIMIT = 200
@@ -300,19 +303,27 @@ async def list_datasources(env: str = "stag") -> ToolResult:
     return ToolResult.success("\n".join(lines))
 
 
-# LogQL line filter the health monitor counts with. It must match the *log level*,
-# not any line containing the substring "error" — the old `|~ "(?i)error|..."`
-# counted JSON response bodies with `"errors":null`, field names, etc. and inflated
-# prod counts ~100-5000x (driver-service: 14.7k matches, 3 real errors). Loki here
-# does NOT populate `detected_level` (verified: every stream returns <none>), so we
-# anchor to the level field across the three formats actually in prod:
-#   Go/JSON   {"level":"error"...}  — driver/order; user-service uses {"lvl":"error"}
-#   Ruby      E, [...] ERROR -- :   — da-api (also FATAL)
-#   Spring    <ts>  ERROR 7 --- [..] — payment (its 436 "errors" were all WARN/OTel)
-# Verified on prod 2026-06-22: driver 14694→3, payment 436→0, da-api 159→100 (real).
+# LogQL line filter the health monitor counts with. It matches *real incidents* —
+# HTTP 5xx (the server failed) plus hard crashes (fatal/panic) — NOT every line
+# containing "error". Two earlier filters were wrong:
+#   1. `|~ "(?i)error|..."` counted JSON bodies with `"errors":null`, field names,
+#      etc. → inflated prod counts ~100-5000x (driver-service: 14.7k / 3 real).
+#   2. anchoring to log *level* (level=error) both over- and under-counts: it floods
+#      on benign client-fault logs (da-api `Nil JSON web token`, user-service
+#      `sql: no rows` → all 400s) yet MISSES real 5xx, because request loggers emit
+#      the 5xx line at INFO level (verified prod: order 26 real 5xx but 4 level=error;
+#      da-api logs `Completed 500` at INFO). Loki here does not populate detected_level.
+# 5xx is the format-agnostic "we broke" signal across the three prod log shapes:
+#   Go/JSON  "status":500           — driver/order/user request logger
+#   Ruby     Completed 500 ...      — da-api (Rails), logged at INFO
+#   crash    "level":"fatal"/"panic" (Go) · `FATAL --`/`PANIC ...---` (Ruby/Spring)
+# Verified on prod 2026-06-23: da-api → 10 (all `Completed 500`), user 56→0 (all 400),
+# order 26 real 5xx now counted. 4xx client faults are intentionally excluded.
 _ERROR_FILTER = (
-    '|~ `"(level|lvl)":"(error|fatal|panic|dpanic|critical)"'
-    '|(ERROR|FATAL|PANIC|CRITICAL) (--|[0-9]+ ---)`'
+    '|~ `"status":5[0-9][0-9]'
+    '|Completed 5[0-9][0-9]'
+    '|"(level|lvl)":"(fatal|panic|dpanic)"'
+    '|(FATAL|PANIC) (--|[0-9]+ ---)`'
 )
 
 
@@ -336,8 +347,11 @@ async def count_errors(
         return None
     selector = selector.replace("{env}", env_token)
     metric = f"sum(count_over_time({selector} {_ERROR_FILTER} [{window}]))"
+    # High-volume streams (da-api ~1.2M lines/h) force Loki to scan the full window
+    # for the line filter; that scan runs ~24s on prod, so 30s timed out intermittently
+    # and surfaced as "không query được Loki". 60s gives headroom without hanging a cycle.
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             r = await client.get(
                 _proxy_url(base, uid, "/loki/api/v1/query"),
                 headers=_HEADERS,
@@ -346,7 +360,8 @@ async def count_errors(
             )
             r.raise_for_status()
             payload = r.json()
-    except Exception:
+    except Exception as e:
+        log.warning("count_errors failed for selector=%s env=%s: %r", selector, env, e)
         return None
     result = (payload.get("data") or {}).get("result") or []
     if not result:  # vector with no series = zero matches
