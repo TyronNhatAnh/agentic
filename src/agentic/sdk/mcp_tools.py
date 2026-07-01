@@ -58,6 +58,7 @@ async def _run_with_retry(
     *,
     retryable_read: bool,
     service: str,
+    retry_timeout: bool = True,
 ) -> dict[str, Any]:
     """Call a legacy integration fn. Translate ``ToolResult`` → MCP content.
 
@@ -66,6 +67,12 @@ async def _run_with_retry(
     Write verbs (``retryable_read=False``) never retry. Raw exceptions are
     classified via ``classify_exception`` so the brain sees AUTH/CONFIG/etc.
     instead of a stack trace.
+
+    ``retry_timeout=False`` excludes TIMEOUT from the retryable set (still
+    retries NETWORK/SERVER/RATE_LIMIT). Use for backends where a timeout means
+    the request itself is too heavy — retrying the same query just multiplies
+    wall time and re-times-out (e.g. Loki log searches). NETWORK/SERVER are
+    still genuinely transient and worth a retry.
     """
     last: ToolResult | None = None
     for attempt in range(_MAX_RETRIES + 1):
@@ -86,6 +93,7 @@ async def _run_with_retry(
         if (
             not retryable_read
             or not result.retryable
+            or (not retry_timeout and result.error_code == "TIMEOUT")
             or attempt >= _MAX_RETRIES
         ):
             break
@@ -868,7 +876,7 @@ async def grafana_search_logs(args: dict[str, Any]) -> dict[str, Any]:
             service=args.get("service", ""),
             log_filter=args.get("filter", ""),
         ),
-        retryable_read=True, service="Grafana",
+        retryable_read=True, service="Grafana", retry_timeout=False,
     )
 
 

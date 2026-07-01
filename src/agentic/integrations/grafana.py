@@ -279,7 +279,11 @@ async def search_logs(
         "limit": str(limit),
         "direction": direction if direction in ("backward", "forward") else "backward",
     }
-    async with httpx.AsyncClient(timeout=60) as client:
+    # 30s, not 60s: the brain iterates on log searches, and a query heavy
+    # enough to exceed 30s deterministically re-times-out on retry — better to
+    # fail fast and let the brain narrow the window/filter. Paired with
+    # retry_timeout=False on the grafana_search_logs tool wiring.
+    async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(
             _proxy_url(base, uid, "/loki/api/v1/query_range"),
             headers=_HEADERS,

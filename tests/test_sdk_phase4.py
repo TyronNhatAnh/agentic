@@ -65,6 +65,42 @@ async def test_pre_post_tool_logs_ok_row_with_duration():
     assert rows[0]["input_tokens"] is None
 
 
+async def test_post_tool_logs_redacted_response_output():
+    hooks = build_brain_hooks(thread_ts="t1", channel="C1")
+    post = hooks["PostToolUse"][0].hooks[0]
+    await post(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "grep -rn x ."},
+            "tool_response": {"content": [{"type": "text", "text": "no matches found"}]},
+            "tool_use_id": "tu_o",
+        },
+        "tu_o",
+        None,
+    )
+    row = _rows()[0]
+    assert row["status"] == "ok"
+    assert "no matches found" in row["output"]
+
+
+async def test_post_tool_output_redacts_secrets():
+    hooks = build_brain_hooks(thread_ts="t1", channel="C1")
+    post = hooks["PostToolUse"][0].hooks[0]
+    await post(
+        {
+            "tool_name": "git_push",
+            "tool_input": {"cmd": "push"},
+            "tool_response": "remote: https://x-access-token:ghp_AAAAAAAAAAAAAAAAAAAA@github.com/o/r.git",
+            "tool_use_id": "tu_os",
+        },
+        "tu_os",
+        None,
+    )
+    out = _rows()[0]["output"]
+    assert "ghp_AAAAAAAAAAAAAAAAAAAA" not in out
+    assert "«redacted»" in out
+
+
 async def test_post_tool_failure_logs_error_row():
     hooks = build_brain_hooks(thread_ts="t1", channel="C1")
     fail = hooks["PostToolUseFailure"][0].hooks[0]

@@ -145,3 +145,39 @@ async def test_thread_session_manager_evicts_lru(monkeypatch):
     # Give eviction tasks time to complete close calls.
     await asyncio.sleep(0)
     await mgr.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_run_with_retry_timeout_opt_out():
+    """retry_timeout=False: TIMEOUT is not retried, but NETWORK still is."""
+    from agentic.integrations.result import ToolResult
+    from agentic.sdk import mcp_tools
+
+    def make_counter(error_code: str):
+        calls = {"n": 0}
+
+        async def fn():
+            calls["n"] += 1
+            return ToolResult.failure(error_code, "boom", retryable=True)
+
+        return fn, calls
+
+    # TIMEOUT with opt-out: exactly one attempt, no retry.
+    fn, calls = make_counter("TIMEOUT")
+    out = await mcp_tools._run_with_retry(
+        fn, retryable_read=True, service="Grafana", retry_timeout=False
+    )
+    assert calls["n"] == 1
+    assert out["is_error"] is True
+
+    # NETWORK with the same opt-out: still retries the full budget.
+    fn, calls = make_counter("NETWORK")
+    await mcp_tools._run_with_retry(
+        fn, retryable_read=True, service="Grafana", retry_timeout=False
+    )
+    assert calls["n"] == mcp_tools._MAX_RETRIES + 1
+
+    # TIMEOUT with default (retry_timeout=True): retries the full budget.
+    fn, calls = make_counter("TIMEOUT")
+    await mcp_tools._run_with_retry(fn, retryable_read=True, service="X")
+    assert calls["n"] == mcp_tools._MAX_RETRIES + 1
