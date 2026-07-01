@@ -125,7 +125,9 @@ def _fmt_ts(ts_ns: str) -> str:
         return "??:??:??"
 
 
-def _format_streams(payload: dict, *, query: str, env: str, limit: int) -> str:
+def _format_streams(
+    payload: dict, *, query: str, env: str, limit: int, since: str, until: str
+) -> str:
     data = payload.get("data") or {}
     result = data.get("result") or []
     # resultType "streams" = log lines; "matrix"/"vector" = metric (LogQL aggregation).
@@ -144,7 +146,17 @@ def _format_streams(payload: dict, *, query: str, env: str, limit: int) -> str:
             except (ValueError, TypeError):
                 continue
     if not entries:
-        return f"_Không có log cho `{query}` ({env}) trong khoảng thời gian này._"
+        # Absence-of-evidence trap: a bare "không có log" reads as "no error exists",
+        # so the brain stops and clarifies instead of widening. Echo the exact window
+        # scanned (the tool's silent `now-1h` default is otherwise invisible to the
+        # model) and name the next moves — mirror the capped-path's self-describing tone.
+        return (
+            f"_0 dòng khớp `{query}` ({env}) trong `{since}`→`{until}`._\n"
+            "⚠️ Vắng log ≠ không có lỗi — mới là chưa thấy trong window/filter NÀY. "
+            "Đang truy lỗi thì: nới `since` (vd `now-6h`/`now-24h`), bỏ/nới `filter` "
+            "(đừng khoá vào 1 từ khoá đoán), hoặc correlate theo `request_id`/`trace_id`. "
+            'Chỉ kết luận "không có lỗi" sau khi đã quét đủ rộng.'
+        )
 
     entries.sort(key=lambda e: e[0], reverse=True)  # newest first
     shown = entries[:limit]
@@ -158,7 +170,7 @@ def _format_streams(payload: dict, *, query: str, env: str, limit: int) -> str:
     capped = len(entries) >= limit
     head = (
         f"*Grafana/Loki `{env}`* — `{query}` "
-        f"({len(shown)} dòng, phủ {covered}):"
+        f"(window `{since}`→`{until}`, {len(shown)} dòng, phủ {covered}):"
     )
     lines = [head]
     if capped:
@@ -283,7 +295,11 @@ async def search_logs(
             )
         r.raise_for_status()
         payload = r.json()
-    return ToolResult.success(_format_streams(payload, query=query, env=env, limit=limit))
+    return ToolResult.success(
+        _format_streams(
+            payload, query=query, env=env, limit=limit, since=since, until=until
+        )
+    )
 
 
 async def list_datasources(env: str = "stag") -> ToolResult:
