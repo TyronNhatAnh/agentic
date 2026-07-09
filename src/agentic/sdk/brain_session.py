@@ -149,27 +149,34 @@ def _loop_caps() -> dict[str, Any]:
 def _session_dirs(row: dict, policy: WorkspacePolicy) -> tuple[str | None, list[str]]:
     """Resolve the session cwd + writable roots for the dev sub-agent.
 
-    The session cwd is locked at session-open (ThreadSessionManager caches the
-    client per thread), so a worktree created mid-thread can't change it. We
-    therefore (a) open in the thread's active worktree when one already exists,
-    else the shared workspace dir, and (b) add both the workspace and worktree
-    roots to ``add_dirs`` so dev edits land under acceptEdits even when the
-    worktree was created after the session opened — the per-turn worktree path
-    still rides in on the workspace hint (§8 2026-05-29).
+    cwd is anchored to a *stable per-thread constant* — the tier repo root when
+    the channel pins one, else the shared workspace dir — and deliberately NOT
+    the thread's ``active_worktree``. The bundled CLI keys resumable sessions by
+    cwd (it hashes cwd into the ``~/.claude/projects/<cwd>`` dir it looks
+    ``--resume`` up under), so tying cwd to a value that only appears mid-thread
+    (a worktree created during review) diverges the resume key from the
+    session-open key: after idle eviction the next turn re-opens with cwd=worktree,
+    the CLI can't find the session under that path ("No conversation found"),
+    exits 1, and ``client.connect()`` raises ProcessError → the whole turn dies.
+    Keeping cwd constant makes the resume key stable across evict/re-create.
+
+    Worktree writability does not need cwd: dev edits land via ``add_dirs`` under
+    acceptEdits, and the brain reaches the worktree through the per-turn workspace
+    hint. So the worktree is added to ``add_dirs`` (writable) but never becomes cwd.
 
     ``policy.repo_roots`` adds tier-specific readable roots — e.g. the revamp
     channel gets the legacy da-api repo so Read/Glob/Grep can reach it."""
     roots = [d for d in (settings.workspace_dir, settings.worktree_dir) if d]
     roots.extend(r for r in policy.repo_roots if r)
     worktree = (row.get("active_worktree") or "").strip()
-    if worktree and os.path.isdir(worktree):
-        cwd: str | None = worktree
-        if worktree not in roots:
-            roots.append(worktree)
-    elif policy.repo_roots and os.path.isdir(policy.repo_roots[0]):
+    if worktree and os.path.isdir(worktree) and worktree not in roots:
+        # Writable via add_dirs — NOT selected as cwd (see docstring).
+        roots.append(worktree)
+    if policy.repo_roots and os.path.isdir(policy.repo_roots[0]):
         # Tier with its own repo (revamp → legacy da-api): open the session inside
-        # it so Read/Glob/Grep operate on the legacy source by default.
-        cwd = policy.repo_roots[0]
+        # it so Read/Glob/Grep operate on the legacy source by default. Constant
+        # per channel, so the resume key stays stable.
+        cwd: str | None = policy.repo_roots[0]
     else:
         cwd = settings.workspace_dir or None
     # Preserve order, drop dups.

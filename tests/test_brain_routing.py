@@ -53,3 +53,24 @@ def test_tool_progress_renders_only_after_first_tool():
     assert _tool_progress("", 0) == ""
     assert _tool_progress("grafana_query_loki", 1) == "🔧 đang chạy `grafana_query_loki`"
     assert _tool_progress("Bash", 3) == "🔧 đang chạy `Bash` · 3 bước"
+
+
+def test_session_cwd_is_stable_and_never_the_worktree(tmp_path, monkeypatch):
+    # Regression: the bundled CLI keys resumable sessions by cwd. If cwd tracked
+    # the mid-thread active_worktree, resume after idle eviction looked the session
+    # up under a different project dir ("No conversation found" → exit 1 → the turn
+    # crashed with "Command failed with exit code 1"). cwd must stay anchored to a
+    # constant (workspace root here), with the worktree kept writable via add_dirs.
+    from agentic.sdk import brain_session as bs
+    from agentic.policy import PROD_POLICY
+
+    worktree = tmp_path / "web-java" / "web-admin"
+    worktree.mkdir(parents=True)
+    monkeypatch.setattr(bs.settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(bs.settings, "worktree_dir", "")
+
+    cwd, add_dirs = bs._session_dirs({"active_worktree": str(worktree)}, PROD_POLICY)
+
+    assert cwd == str(tmp_path)
+    assert cwd != str(worktree)
+    assert str(worktree) in add_dirs  # still writable under acceptEdits
