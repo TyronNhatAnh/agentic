@@ -808,7 +808,7 @@ async def git_push(args: dict[str, Any]) -> dict[str, Any]:
 
 
 # ============================================================================
-# Notion (1)
+# Notion (4) — create / read / update / delete
 # ============================================================================
 
 @tool(
@@ -821,7 +821,7 @@ async def git_push(args: dict[str, Any]) -> dict[str, Any]:
         "properties": {
             "title": {"type": "string"},
             "markdown": {"type": "string", "description": "page body in markdown"},
-            "parent": {"type": "string", "description": "Notion parent page id; defaults to NOTION_PARENT_PAGE_ID"},
+            "parent": {"type": "string", "description": "Notion parent page id or URL; defaults to NOTION_PARENT_PAGE_ID"},
         },
         "required": ["title"],
     },
@@ -831,6 +831,73 @@ async def notion_create_page(args: dict[str, Any]) -> dict[str, Any]:
         lambda: notion_int.create_page(
             args["title"], args.get("markdown", ""), args.get("parent"),
         ),
+        retryable_read=False, service="Notion",
+    )
+
+
+@tool(
+    "notion_get_page",
+    "Read a Notion page by id or URL — returns its title + body as markdown. "
+    "Requires the Notion integration to be shared on that page (else NOT_FOUND). "
+    "Read-only — no confirm.",
+    {
+        "type": "object",
+        "properties": {
+            "page": {"type": "string", "description": "Notion page id or URL"},
+        },
+        "required": ["page"],
+    },
+)
+async def notion_get_page(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: notion_int.get_page(args["page"]),
+        retryable_read=True, service="Notion",
+    )
+
+
+@tool(
+    "notion_update_page",
+    "Update a Notion page (id or URL): rename via `title` and/or write body via "
+    "`markdown`. `replace_body=true` archives existing content first (full "
+    "rewrite); otherwise the markdown is appended to the end. Give at least one of "
+    "title/markdown. Write tool — no retry.",
+    {
+        "type": "object",
+        "properties": {
+            "page": {"type": "string", "description": "Notion page id or URL"},
+            "title": {"type": "string", "description": "new page title (optional)"},
+            "markdown": {"type": "string", "description": "body in markdown to append (or replace)"},
+            "replace_body": {"type": "boolean", "description": "true = clear existing body before writing (default false = append)"},
+        },
+        "required": ["page"],
+    },
+)
+async def notion_update_page(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: notion_int.update_page(
+            args["page"], args.get("title"), args.get("markdown"),
+            bool(args.get("replace_body", False)),
+        ),
+        retryable_read=False, service="Notion",
+    )
+
+
+@tool(
+    "notion_delete_page",
+    "Delete (archive) a Notion page by id or URL. Reversible — pass `restore=true` "
+    "to un-archive. Write tool — no retry.",
+    {
+        "type": "object",
+        "properties": {
+            "page": {"type": "string", "description": "Notion page id or URL"},
+            "restore": {"type": "boolean", "description": "true = restore instead of delete (default false)"},
+        },
+        "required": ["page"],
+    },
+)
+async def notion_delete_page(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: notion_int.archive_page(args["page"], bool(args.get("restore", False))),
         retryable_read=False, service="Notion",
     )
 
@@ -990,8 +1057,8 @@ _ALL_TOOLS = [
     # git (5)
     git_check_repo, git_prepare_workspace, git_prepare_pr_review_workspace,
     git_commit, git_push,
-    # notion (1)
-    notion_create_page,
+    # notion (4)
+    notion_create_page, notion_get_page, notion_update_page, notion_delete_page,
     # grafana (2)
     grafana_search_logs, grafana_list_datasources,
     # staging db (1)
