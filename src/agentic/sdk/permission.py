@@ -40,7 +40,8 @@ log = logging.getLogger(__name__)
 #      context *before* can_use_tool runs, so it's a block, not a prompt request.
 #      Applied to the brain session AND every sub-agent (history-rewrite git).
 #   2. tool_scope (built per channel in policy.py) — an allowlist enforced by the
-#      callback below; a tool outside it is denied (e.g. revamp = read-only).
+#      callback below; a tool outside it is denied. Unused today (prod = no gate),
+#      kept as the extension point for a future clamped channel.
 #   3. CONFIRM_TOOLS — human-in-the-loop: the callback posts a Slack button and
 #      blocks until the user allows/denies (side-effecting PR ops).
 # ---------------------------------------------------------------------------
@@ -143,7 +144,7 @@ def build_slack_permission_callback(
         if tool_scope is not None and tool_name not in tool_scope and bare not in tool_scope:
             return PermissionResultDeny(
                 behavior="deny",
-                message=f"`{bare}` ngoài scope của channel này (policy revamp: read-only + Notion)",
+                message=f"`{bare}` ngoài scope của channel này",
             )
 
         if not _needs_confirm(tool_name, tool_input):

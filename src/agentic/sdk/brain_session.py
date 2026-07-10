@@ -75,7 +75,7 @@ def make_brain_options_factory(
     server = mcp_server or build_agentic_mcp_server()
     # Prompts for every policy loaded once at startup so the per-channel system
     # prompt is pinned into the prefix cache (channel is fixed per thread, so each
-    # session still has a stable prefix). prod=brain_sdk, revamp=brain_revamp.
+    # session still has a stable prefix). Prod uses brain_sdk.
     prompt_cache: dict[str, str] = {}
 
     def _prompt(name: str) -> str:
@@ -164,8 +164,8 @@ def _session_dirs(row: dict, policy: WorkspacePolicy) -> tuple[str | None, list[
     acceptEdits, and the brain reaches the worktree through the per-turn workspace
     hint. So the worktree is added to ``add_dirs`` (writable) but never becomes cwd.
 
-    ``policy.repo_roots`` adds tier-specific readable roots — e.g. the revamp
-    channel gets the legacy da-api repo so Read/Glob/Grep can reach it."""
+    ``policy.repo_roots`` adds tier-specific readable roots — empty for prod, but
+    a future channel could pin its own repo here so Read/Glob/Grep can reach it."""
     roots = [d for d in (settings.workspace_dir, settings.worktree_dir) if d]
     roots.extend(r for r in policy.repo_roots if r)
     worktree = (row.get("active_worktree") or "").strip()
@@ -173,9 +173,9 @@ def _session_dirs(row: dict, policy: WorkspacePolicy) -> tuple[str | None, list[
         # Writable via add_dirs — NOT selected as cwd (see docstring).
         roots.append(worktree)
     if policy.repo_roots and os.path.isdir(policy.repo_roots[0]):
-        # Tier with its own repo (revamp → legacy da-api): open the session inside
-        # it so Read/Glob/Grep operate on the legacy source by default. Constant
-        # per channel, so the resume key stays stable.
+        # Tier that pins its own repo: open the session inside it so Read/Glob/Grep
+        # operate on that source by default. Constant per channel, so the resume key
+        # stays stable. (No tier does this today — prod's repo_roots is empty.)
         cwd: str | None = policy.repo_roots[0]
     else:
         cwd = settings.workspace_dir or None

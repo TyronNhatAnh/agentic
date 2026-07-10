@@ -61,24 +61,6 @@ CREATE TABLE IF NOT EXISTS service_repos (
     loki_selector TEXT
 );
 
-CREATE TABLE IF NOT EXISTS revamp_modules (
-    run_key TEXT NOT NULL,
-    module TEXT NOT NULL,
-    status TEXT NOT NULL,
-    doc_url TEXT,
-    doc_page_id TEXT,
-    error TEXT,
-    updated_at REAL NOT NULL,
-    PRIMARY KEY (run_key, module)
-);
-
-CREATE TABLE IF NOT EXISTS revamp_runs (
-    run_key TEXT PRIMARY KEY,
-    index_page_id TEXT,
-    index_url TEXT,
-    updated_at REAL NOT NULL
-);
-
 -- SDK session transcript, append-only. Replaces the read-modify-write of the
 -- `threads.sdk_state_blob` column: one row per entry, so an append is O(new
 -- entries) and atomic per-transaction (a crash mid-append rolls back instead of
@@ -433,78 +415,6 @@ def list_services() -> list[dict]:
     with connect() as conn:
         rows = conn.execute("SELECT * FROM service_repos ORDER BY name").fetchall()
     return [dict(r) for r in rows]
-
-
-def upsert_revamp_module(
-    run_key: str,
-    module: str,
-    *,
-    status: str,
-    doc_url: str | None = None,
-    doc_page_id: str | None = None,
-    error: str | None = None,
-) -> None:
-    """Record (or update) the outcome of analysing one module in a revamp run.
-    The (run_key, module) primary key makes the pipeline idempotent — a rerun
-    sees the prior ``done`` row and skips re-analysing/re-publishing."""
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO revamp_modules(run_key, module, status, doc_url,
-                                       doc_page_id, error, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(run_key, module) DO UPDATE SET
-                status      = excluded.status,
-                doc_url     = excluded.doc_url,
-                doc_page_id = excluded.doc_page_id,
-                error       = excluded.error,
-                updated_at  = excluded.updated_at
-            """,
-            (run_key, module, status, doc_url, doc_page_id, error, time.time()),
-        )
-
-
-def get_revamp_module(run_key: str, module: str) -> dict | None:
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM revamp_modules WHERE run_key=? AND module=?",
-            (run_key, module),
-        ).fetchone()
-        return dict(row) if row else None
-
-
-def list_revamp_modules(run_key: str) -> list[dict]:
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM revamp_modules WHERE run_key=? ORDER BY module",
-            (run_key,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def get_revamp_run(run_key: str) -> dict | None:
-    """The per-run Notion index page, so a rerun nests new module pages under the
-    same index instead of creating a fresh one."""
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM revamp_runs WHERE run_key=?", (run_key,)
-        ).fetchone()
-        return dict(row) if row else None
-
-
-def upsert_revamp_run(run_key: str, index_page_id: str, index_url: str) -> None:
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO revamp_runs(run_key, index_page_id, index_url, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(run_key) DO UPDATE SET
-                index_page_id = excluded.index_page_id,
-                index_url     = excluded.index_url,
-                updated_at    = excluded.updated_at
-            """,
-            (run_key, index_page_id, index_url, time.time()),
-        )
 
 
 def append_session_entries(

@@ -133,7 +133,7 @@ async def test_permission_callback_allow_via_button(monkeypatch):
 
 def test_build_subagents_keys():
     agents = build_subagents()
-    assert set(agents.keys()) == {"po", "ba", "review", "dev", "archaeologist"}
+    assert set(agents.keys()) == {"po", "ba", "review", "dev"}
 
 
 def test_build_subagents_po_ba_text_only():
@@ -194,8 +194,8 @@ async def test_brain_options_factory_wires_subagents():
         slack_client=AsyncMock(),
     )
     opts = await factory(thread_ts)
-    # Default channel → prod policy → all sub-agents (incl. archaeologist).
-    assert set(opts.agents.keys()) == {"po", "ba", "review", "dev", "archaeologist"}
+    # Default channel → prod policy → all sub-agents.
+    assert set(opts.agents.keys()) == {"po", "ba", "review", "dev"}
     assert opts.permission_mode == "default"
     # Brain model must be wired (was dead config before) so it doesn't silently
     # run on the expensive CLI-default Opus.

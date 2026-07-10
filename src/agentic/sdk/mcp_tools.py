@@ -814,7 +814,7 @@ async def git_push(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "notion_create_page",
     "Create a Notion page (markdown body) under a parent page. Use to publish "
-    "revamp design docs / analysis. `parent` defaults to NOTION_PARENT_PAGE_ID. "
+    "docs / notes / analysis to Notion. `parent` defaults to NOTION_PARENT_PAGE_ID. "
     "Write tool — no retry.",
     {
         "type": "object",
@@ -897,7 +897,7 @@ async def grafana_list_datasources(args: dict[str, Any]) -> dict[str, Any]:
 
 
 # ============================================================================
-# Revamp DB (1) — read-only introspection via the order-service debug API
+# Staging DB (1) — read-only introspection via the order-service debug API
 # ============================================================================
 
 @tool(
@@ -994,7 +994,7 @@ _ALL_TOOLS = [
     notion_create_page,
     # grafana (2)
     grafana_search_logs, grafana_list_datasources,
-    # revamp db (1)
+    # staging db (1)
     db_query,
     # ship (1)
     ship_create_pr,

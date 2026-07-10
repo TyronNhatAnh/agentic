@@ -1,8 +1,8 @@
-"""Read-only DB access for the revamp archaeologist via the order-service debug API.
+"""Read-only staging DB introspection (the db_query tool) via the order-service debug API.
 
-Why this exists: the legacy `db/schema.rb` is outdated and a chunk of behavior is
-driven by *config rows* that live only in the database — neither is recoverable
-from source. The archaeologist needs the live schema + config rows.
+Why this exists: the brain sometimes needs the *live* schema + config rows to
+debug — a chunk of behavior is driven by config rows that live only in the
+database, and the checked-in schema can lag reality.
 
 The staging DB sits behind a VPN the bot host can't reach, so the old direct
 MariaDB connection was unusable. We now go through ``ggx-kr-order-service``'s

@@ -1,13 +1,12 @@
-"""Notion connector — docs sink for the da-api revamp tier.
+"""Notion connector — publish docs/notes to Notion.
 
 V1 surface is intentionally tiny: create a page (with a markdown body) under a
-parent page. That covers the revamp pipeline (one page per analysed module + a
-spec page) and the ``notion_create_page`` MCP tool the revamp brain can call.
+parent page. That backs the ``notion_create_page`` MCP tool the brain can call.
 
-We do NOT pull in a markdown library — the converter handles the block kinds the
-archaeologist/spec prompts actually emit (headings h1-h3, bullets, numbered
-items, fenced code, paragraphs). Anything fancier degrades to a paragraph rather
-than failing. Notion limits we respect: ≤100 block children per request (extra
+We do NOT pull in a markdown library — the converter handles the common block
+kinds (headings h1-h3, bullets, numbered items, fenced code, paragraphs).
+Anything fancier degrades to a paragraph rather than failing. Notion limits we
+respect: ≤100 block children per request (extra
 blocks are PATCH-appended), ≤2000 chars per rich_text segment (long text is split
 across segments within one block).
 """

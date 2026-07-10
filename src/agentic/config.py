@@ -42,29 +42,14 @@ class Settings(BaseSettings):
     jira_default_project: str = Field(default="", alias="JIRA_DEFAULT_PROJECT")
     jira_board_id: int = Field(default=0, alias="JIRA_BOARD_ID")
 
-    # Notion (revamp docs sink). Empty token disables the notion_create_page tool
-    # and the revamp pipeline's Notion writes (pipeline reports the missing config
-    # instead of failing mid-run).
+    # Notion. Empty token disables the notion_create_page tool (it returns a CONFIG
+    # error instead of failing). NOTION_PAGE_ID is the default parent page new pages
+    # nest under when the caller doesn't pass an explicit parent.
     notion_token: str = Field(default="", alias="NOTION_TOKEN")
-    # Reuses the existing NOTION_PAGE_ID from .env.example as the parent page the
-    # revamp pipeline nests module/spec pages under.
     notion_parent_page_id: str = Field(default="", alias="NOTION_PAGE_ID")
     notion_version: str = Field(default="2022-06-28", alias="NOTION_VERSION")
 
-    # da-api revamp tier. The bot tells prod-ops apart from revamp by Slack channel
-    # ID (resolve_policy in policy.py). Legacy repo is the read-only Ruby source the
-    # archaeologist analyses; it must be a path the SDK can read (added to add_dirs).
-    revamp_channel_id: str = Field(default="", alias="REVAMP_CHANNEL_ID")
-    revamp_legacy_repo: str = Field(default="", alias="REVAMP_LEGACY_REPO")
-    # Service name (in the registry) of the rewrite target repo for the revamp
-    # project — where impl/PR work will land once that phase starts. Recorded now
-    # so the binding is explicit; hard per-repo scope enforcement is a later phase.
-    revamp_target_service: str = Field(default="", alias="REVAMP_TARGET_SERVICE")
-    # Hard cap on modules analysed per `revamp <scope>` run — a backstop so a broad
-    # scope can't fan out into hundreds of archaeologist calls. The pipeline logs
-    # when it truncates rather than silently dropping modules.
-    revamp_module_cap: int = Field(default=40, alias="REVAMP_MODULE_CAP")
-    # Read-only DB access for the archaeologist goes through ggx-kr-order-service's
+    # Read-only DB introspection (the db_query tool) goes through ggx-kr-order-service's
     # debug-query admin API (POST /api/v1/admin/orders/debug/query) — a TEMPORARY,
     # staging-only inspector that runs one read-only statement against the read
     # replica. It replaced the direct MariaDB connection, which the bot host couldn't
@@ -78,12 +63,6 @@ class Settings(BaseSettings):
     # server's query timeout.
     order_debug_row_cap: int = Field(default=200, alias="ORDER_DEBUG_ROW_CAP")
     order_debug_timeout_s: int = Field(default=20, alias="ORDER_DEBUG_TIMEOUT_S")
-    # Path to the canonical migrations (the "common services" repo, NOT the legacy
-    # da-api repo whose schema.rb is stale). Added to the archaeologist's add_dirs so
-    # it can Read the real migration history alongside live DB introspection.
-    revamp_common_migrations_dir: str = Field(
-        default="", alias="REVAMP_COMMON_MIGRATIONS_DIR"
-    )
 
     workspace_dir: str = Field(default="", alias="WORKSPACE_DIR")
     worktree_dir: str = Field(default="", alias="WORKTREE_DIR")
