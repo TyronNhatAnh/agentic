@@ -249,6 +249,18 @@ async def _read_children(client: httpx.AsyncClient, block_id: str, depth: int, m
     return lines
 
 
+def _page_read_result(page_id: str, title: str, url: str, body: str) -> ToolResult:
+    """Build the read ToolResult. Crucially sets ``message`` — ToolResult.display()
+    (what the MCP layer sends the brain) renders ONLY data["message"] for dict
+    payloads, so omitting it makes a successful read surface as empty text."""
+    header = f"# {title}\n<{url}>".strip()
+    body = (body or "").strip()
+    message = f"{header}\n\n{body}" if body else f"{header}\n\n_(page không có nội dung block)_"
+    return ToolResult.success(
+        {"message": message, "title": title, "url": url, "id": page_id, "markdown": body}
+    )
+
+
 async def get_page(ref: str, max_depth: int = 4) -> ToolResult:
     """Read a Notion page (id or URL) → title + URL + markdown body. Requires the
     integration behind NOTION_TOKEN to be shared on the page, else Notion 404s."""
@@ -258,13 +270,8 @@ async def get_page(ref: str, max_depth: int = 4) -> ToolResult:
         pr.raise_for_status()
         page = pr.json()
         lines = await _read_children(client, page_id, 0, max_depth)
-    return ToolResult.success(
-        {
-            "title": _page_title(page),
-            "url": page.get("url", ""),
-            "id": page_id,
-            "markdown": "\n".join(lines).strip(),
-        }
+    return _page_read_result(
+        page_id, _page_title(page), page.get("url", ""), "\n".join(lines)
     )
 
 

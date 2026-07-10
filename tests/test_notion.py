@@ -64,6 +64,25 @@ class TestBlockToMd:
         assert notion._block_to_md({"type": "equation", "equation": self._rt("x=1")}) == ["x=1"]
 
 
+class TestPageReadResult:
+    """Regression: get_page must set data['message'] — ToolResult.display() renders
+    only that for dict payloads, so a missing message surfaces a read as empty text
+    to the brain (the bug that made the bot report 'tool trả rỗng')."""
+
+    def test_message_present_and_display_nonempty(self):
+        res = notion._page_read_result("id1", "My Page", "https://n/p/id1", "# H\nbody")
+        assert res.ok
+        assert res.data["message"]  # non-empty
+        assert res.display()  # what the MCP layer sends the brain — must not be ""
+        assert "My Page" in res.display()
+        assert "body" in res.display()
+
+    def test_empty_body_still_reports_something(self):
+        res = notion._page_read_result("id1", "Empty", "https://n/p/id1", "   ")
+        assert res.display().strip()  # not blank
+        assert res.data["markdown"] == ""
+
+
 def test_markdown_roundtrip_headings_bullets_code():
     md = "# Title\n- a\n- b\n\n```py\nx=1\n```"
     blocks = notion.markdown_to_blocks(md)
