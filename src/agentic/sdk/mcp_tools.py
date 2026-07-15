@@ -729,6 +729,29 @@ async def git_check_repo(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "git_latest_release",
+    "Fetch fresh remote state (via GITHUB_TOKEN over HTTPS, no SSH) and report the "
+    "most recent releases/* branch and its HEAD commit (full+short id, message, author, "
+    "date). Use this for any 'what's the latest release branch / commit id' question — "
+    "do NOT run a raw `git fetch` via Bash, which uses the SSH remote and fails in the "
+    "sandbox. Supply either service (from service_repos) or repo path.",
+    {
+        "type": "object",
+        "properties": {
+            "service": {"type": "string"},
+            "repo": {"type": "string"},
+        },
+        "required": [],
+    },
+)
+async def git_latest_release(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: git_int.latest_release_branch(args.get("service"), args.get("repo")),
+        retryable_read=True, service="git",
+    )
+
+
+@tool(
     "git_prepare_workspace",
     "Create a worktree + feature/<ticket> branch for a service. Base auto-resolved from Jira sprint (releases/DAPro-2.<sprint>).",
     {
@@ -1091,9 +1114,9 @@ _ALL_TOOLS = [
     jira_list_transitions, jira_transition_issue,
     # registry (1)
     list_services,
-    # git (5)
-    git_check_repo, git_prepare_workspace, git_prepare_pr_review_workspace,
-    git_commit, git_push,
+    # git (6)
+    git_check_repo, git_latest_release, git_prepare_workspace,
+    git_prepare_pr_review_workspace, git_commit, git_push,
     # notion (4)
     notion_create_page, notion_get_page, notion_update_page, notion_delete_page,
     # grafana (2)

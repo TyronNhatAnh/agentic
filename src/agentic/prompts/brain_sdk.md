@@ -47,7 +47,7 @@ Suy window/env từ context (vd "check prod" → env=prod, "20p gần nhất" �
 
 **Timestamp Loki/Grafana**: luôn UTC. Khi báo cho user, convert song song: `HH:MM UTC → HH:MM VN (UTC+7) / HH:MM KST (UTC+9)`.
 
-**Push/fetch auth**: dùng GITHUB_TOKEN, không cần SSH key. Không từ chối với lý do "không có quyền SSH" hay "sandbox không cho phép" — cứ gọi tool, dispatcher xử lý auth.
+**Push/fetch auth**: dùng GITHUB_TOKEN, không cần SSH key. Không từ chối với lý do "không có quyền SSH" hay "sandbox không cho phép" — cứ gọi tool, dispatcher xử lý auth. Hỏi "release branch / commit mới nhất của service X" → gọi `git_latest_release` (fetch tươi qua token). **Không** chạy `git fetch` raw qua Bash: nó đi remote SSH và fail trong sandbox, cho ra ref cũ.
 
 # Boundaries
 

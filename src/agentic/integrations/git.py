@@ -175,6 +175,101 @@ async def check_repo(service: str | None = None, repo: str | None = None) -> Too
     )
 
 
+async def latest_release_branch(service: str | None = None,
+                                repo: str | None = None) -> ToolResult:
+    """Fetch fresh remote state via GITHUB_TOKEN (HTTPS) and report the most
+    recent ``releases/*`` branch + its HEAD commit.
+
+    Root-cause path for "what's the latest release branch / commit" questions.
+    A raw ``git fetch origin`` uses the SSH remote (``git@github.com:``), which
+    cannot reach the user's ssh-agent from inside the sandboxed Bash — so it
+    fails regardless of ``ssh-add``. Here we fetch over HTTPS+token like the
+    other git tools, and pass an EXPLICIT refspec so ``refs/remotes/origin/
+    releases/*`` is actually updated (a bare ``git fetch <url>`` only writes
+    FETCH_HEAD, leaving remote-tracking refs stale — the bug that made the bot
+    report an old commit).
+    """
+    svc = None
+    if repo:
+        try:
+            svc = resolve_service_by_github_repo(repo)
+        except ValueError as e:
+            return ToolResult.failure("VALIDATION", str(e))
+    if not svc and service:
+        svc = resolve_service(service)
+    if not svc:
+        target = repo or service or "repo/service"
+        return ToolResult.failure(
+            "NOT_FOUND",
+            f"Chưa có mapping local cho `{target}` trong service_repos.",
+        )
+
+    repo_path = (svc.get("repo_path") or "").strip()
+    if not repo_path:
+        return ToolResult.failure(
+            "CONFIG",
+            f"Service `{svc['name']}` chưa cấu hình `repo_path` (chưa có clone local). "
+            "Set path trong services.json/service_repos trước nhé.",
+        )
+    if not Path(repo_path).is_dir() or not Path(repo_path, ".git").exists():
+        return ToolResult.failure(
+            "CONFIG",
+            f"Repo path `{repo_path}` chưa tồn tại hoặc chưa phải git repo.",
+        )
+
+    if not settings.github_token:
+        return ToolResult.failure(
+            "CONFIG",
+            "GITHUB_TOKEN chưa set — không fetch được qua HTTPS, và SSH không dùng "
+            "được trong sandbox. Set GITHUB_TOKEN để đọc state remote mới nhất.",
+        )
+
+    fetch_url, authed_env = await _authed_remote_url(repo_path)
+    if fetch_url == "origin":
+        # Remote isn't a github URL we can rewrite to HTTPS+token.
+        return ToolResult.failure(
+            "CONFIG",
+            "Remote origin không phải github URL rewrite được sang HTTPS+token.",
+        )
+    # Explicit refspec → remote-tracking refs get updated (not just FETCH_HEAD).
+    rc, _, err = await _run_git(
+        "fetch", fetch_url,
+        "+refs/heads/releases/*:refs/remotes/origin/releases/*",
+        "--prune",
+        cwd=repo_path, env=authed_env,
+    )
+    if rc != 0:
+        return ToolResult.failure("GIT_FETCH", f"git fetch lỗi: {err[:200]}")
+
+    fmt = "%(refname:short)%09%(objectname)%09%(objectname:short)%09%(committerdate:iso8601)%09%(authorname)%09%(contents:subject)"
+    rc, out, _ = await _run_git(
+        "for-each-ref", "--sort=-committerdate", f"--format={fmt}",
+        "refs/remotes/origin/releases/", cwd=repo_path,
+    )
+    lines = [l for l in out.splitlines() if l.strip()]
+    if rc != 0 or not lines:
+        return ToolResult.failure(
+            "NOT_FOUND",
+            f"Không thấy branch `releases/*` nào trên origin của `{svc['name']}`.",
+        )
+    parts = lines[0].split("\t")
+    branch = parts[0].removeprefix("origin/")
+    full_sha = parts[1] if len(parts) > 1 else "?"
+    short_sha = parts[2] if len(parts) > 2 else full_sha[:9]
+    date = parts[3] if len(parts) > 3 else "?"
+    author = parts[4] if len(parts) > 4 else "?"
+    subject = parts[5] if len(parts) > 5 else ""
+    github_repo = (svc.get("github_repo") or "").strip()
+    return ToolResult.success(
+        f"Release branch mới nhất của `{svc['name']}`"
+        f"{f' ({github_repo})' if github_repo else ''}: `{branch}`\n"
+        f"• Commit: `{full_sha}` (short `{short_sha}`)\n"
+        f"• Message: {subject}\n"
+        f"• Author: {author} — {date}\n"
+        f"(fetch tươi qua HTTPS+token, đã cập nhật ref remote)"
+    )
+
+
 async def _resolve_base_branch(service: dict) -> str:
     """Format the base branch from the global template + active sprint.
 
@@ -510,6 +605,9 @@ ACTION_HANDLERS = {
         bool(p.get("confirmed", False)),
     ),
     "git.push": lambda p: push_branch(p["service"], p["ticket"]),
+    "git.latest_release": lambda p: latest_release_branch(
+        p.get("service"), p.get("repo")
+    ),
 }
 
 
