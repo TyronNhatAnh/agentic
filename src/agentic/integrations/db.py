@@ -1,15 +1,17 @@
-"""Read-only staging DB introspection (the db_query tool) via the order-service debug API.
+"""Read-only DB introspection (db_query / db_query_prod tools) via the order-service debug API.
 
 Why this exists: the brain sometimes needs the *live* schema + config rows to
 debug — a chunk of behavior is driven by config rows that live only in the
 database, and the checked-in schema can lag reality.
 
-The staging DB sits behind a VPN the bot host can't reach, so the old direct
-MariaDB connection was unusable. We now go through ``ggx-kr-order-service``'s
-``POST /api/v1/admin/orders/debug/query`` admin endpoint instead — a TEMPORARY,
-staging-only inspector that runs one read-only statement against the read replica
-and returns ``{"rowCount", "rows"}``. The endpoint only exists when that service's
-``APP_ENV != prod`` (prod → 403/404), so this can never hit production.
+The DB sits behind a VPN the bot host can't reach, so the old direct MariaDB
+connection was unusable. We now go through ``ggx-kr-order-service``'s
+``POST /api/v1/admin/orders/debug/query`` admin endpoint instead — it runs one
+read-only statement against the read replica and returns ``{"rowCount", "rows"}``.
+The route ships on all envs (PR #1084 removed the env gate); ``query`` targets
+staging and ``query_prod`` targets the prod replica (``@@read_only=1``). The prod
+path hits real customer PII, so its tool (``db_query_prod``) is in CONFIRM_TOOLS
+and always prompts for a Slack button before it runs.
 
 Safety is layered — the server validates (allowed prefixes, banned DML keywords,
 single statement, LIMIT 1000, 15s timeout, audit log), and Python adds a client-side
@@ -106,18 +108,19 @@ def _render(safe_sql: str, rows: list[dict], row_count: int | None = None) -> st
 
 _ENDPOINT = "/api/v1/admin/orders/debug/query"
 
+# Cloudflare fronts the prod host and 1010-blocks a default httpx UA; send a
+# browser UA (matches the prod-db-query skill's query.sh). Harmless on staging.
+_BROWSER_UA = "Mozilla/5.0"
 
-def _configured() -> bool:
-    return bool(settings.order_debug_base_url and settings.order_debug_admin_token)
 
-
-def _map_http_error(status: int, body: str) -> ToolResult:
+def _map_http_error(status: int, body: str, *, base_url_env: str) -> ToolResult:
     """Translate the debug-API HTTP status into a user-facing ToolResult.
 
     The server returns short bodies (e.g. ``accessToken``, ``PerMissionDenied``,
     ``only a single read-only query is allowed``, or a raw MySQL error); we relay a
     truncated form. AUTH/VALIDATION/CONFIG are terminal (no retry — a 400/401 won't
-    pass on a second identical call); 5xx is transient.
+    pass on a second identical call); 5xx is transient. ``base_url_env`` names the
+    env var to check so the 404 hint points at the right (staging vs prod) config.
     """
     snippet = (body or "").strip()[:300]
     if status in (401, 403):
@@ -128,8 +131,8 @@ def _map_http_error(status: int, body: str) -> ToolResult:
     if status == 404:
         return ToolResult.failure(
             "CONFIG",
-            "Debug query API 404: route không tồn tại — endpoint chỉ có khi service "
-            "chạy non-prod. Kiểm tra ORDER_DEBUG_BASE_URL trỏ đúng staging.",
+            f"Debug query API 404: route không tồn tại — kiểm tra {base_url_env} "
+            "trỏ đúng host + service đã deploy debug endpoint.",
         )
     if status == 400:
         return ToolResult.failure(
@@ -140,23 +143,24 @@ def _map_http_error(status: int, body: str) -> ToolResult:
     )
 
 
-async def query(sql: str) -> ToolResult:
-    """Run one read-only statement against the staging read replica via the
-    order-service debug-query admin API."""
-    if not _configured():
+async def _run_query(sql: str, *, base_url: str, token: str, base_url_env: str) -> ToolResult:
+    """Shared read-only debug-query call. staging (``query``) and prod
+    (``query_prod``) differ only in the (base_url, token) target."""
+    if not (base_url and token):
         return ToolResult.failure(
             "CONFIG",
-            "Chưa cấu hình ORDER_DEBUG_BASE_URL / ORDER_DEBUG_ADMIN_TOKEN. "
-            "Set host staging + admin token (role AdminUser) rồi thử lại.",
+            f"Chưa cấu hình {base_url_env} / token tương ứng. "
+            "Set host + admin token (role AdminUser) rồi thử lại.",
         )
     safe, err = guard_sql(sql, row_cap=settings.order_debug_row_cap)
     if err:
         return err
 
-    url = settings.order_debug_base_url.rstrip("/") + _ENDPOINT
+    url = base_url.rstrip("/") + _ENDPOINT
     headers = {
-        "Authorization": f"Bearer {settings.order_debug_admin_token}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
+        "User-Agent": _BROWSER_UA,
     }
     try:
         async with httpx.AsyncClient(timeout=settings.order_debug_timeout_s) as client:
@@ -174,7 +178,7 @@ async def query(sql: str) -> ToolResult:
         return ToolResult.failure("NETWORK", f"Gọi debug query API lỗi mạng: {msg}", retryable=True)
 
     if r.status_code != 200:
-        return _map_http_error(r.status_code, r.text)
+        return _map_http_error(r.status_code, r.text, base_url_env=base_url_env)
 
     try:
         payload = r.json()
@@ -185,3 +189,26 @@ async def query(sql: str) -> ToolResult:
     rows = list(payload.get("rows") or [])
     row_count = payload.get("rowCount", len(rows))
     return ToolResult.success(_render(safe, rows, row_count))
+
+
+async def query(sql: str) -> ToolResult:
+    """Run one read-only statement against the STAGING read replica via the
+    order-service debug-query admin API."""
+    return await _run_query(
+        sql,
+        base_url=settings.order_debug_base_url,
+        token=settings.order_debug_admin_token,
+        base_url_env="ORDER_DEBUG_BASE_URL",
+    )
+
+
+async def query_prod(sql: str) -> ToolResult:
+    """Run one read-only statement against the PRODUCTION read replica via the
+    order-service debug-query admin API. Gated by CONFIRM_TOOLS (Slack button) —
+    hits real customer PII and is audit-logged."""
+    return await _run_query(
+        sql,
+        base_url=settings.order_debug_prod_base_url,
+        token=settings.order_debug_prod_admin_token,
+        base_url_env="ORDER_DEBUG_PROD_BASE_URL",
+    )

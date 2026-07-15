@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     # token disables db_query (it returns a CONFIG error instead of failing).
     order_debug_base_url: str = Field(default="", alias="ORDER_DEBUG_BASE_URL")
     order_debug_admin_token: str = Field(default="", alias="ORDER_DEBUG_ADMIN_TOKEN")
+    # PRODUCTION variant (the db_query_prod tool). Same debug endpoint, but the prod
+    # host + a genuine prod AdminUser token, backed by a physical read replica
+    # (@@read_only=1). Hits real customer PII, so the tool is in CONFIRM_TOOLS — it
+    # always prompts for a Slack button. Empty base URL or token = db_query_prod off.
+    order_debug_prod_base_url: str = Field(default="", alias="ORDER_DEBUG_PROD_BASE_URL")
+    order_debug_prod_admin_token: str = Field(default="", alias="ORDER_DEBUG_PROD_ADMIN_TOKEN")
     # The server caps at 1000 rows / 15s itself; these are client-side bounds so a
     # broad query can't bloat the transcript and the HTTP wait stays above the
     # server's query timeout.

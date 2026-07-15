@@ -997,6 +997,43 @@ async def db_query(args: dict[str, Any]) -> dict[str, Any]:
 
 
 # ============================================================================
+# Production DB (1) — read-only, CONFIRM-gated (real customer PII)
+# ============================================================================
+
+@tool(
+    "db_query_prod",
+    (
+        "Run ONE read-only SQL statement against the ggx-kr-order-service "
+        "PRODUCTION read replica via its admin debug-query API and return the rows. "
+        "This hits REAL customer data (PII) and every call is audit-logged, so it "
+        "ALWAYS asks the user for a Slack confirm button before running — the "
+        "confirmation is handled for you; do NOT ask again in text. "
+        "Prefer db_query (staging) whenever the data exists on staging; only reach "
+        "for prod to diagnose a live incident, verify prod-only records, or confirm "
+        "a data fix. Filter tightly — never `SELECT *` on broad tables. "
+        "Allowed: SELECT / WITH / SHOW / DESCRIBE / EXPLAIN only; mutations, "
+        "multi-statements and file access are rejected (client + server guard). "
+        "A bare SELECT without LIMIT is capped automatically."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "sql": {"type": "string", "description": "one read-only statement"},
+        },
+        "required": ["sql"],
+    },
+)
+async def db_query_prod(args: dict[str, Any]) -> dict[str, Any]:
+    # Read-only + CONFIRM-gated: the can_use_tool callback already got a human
+    # yes before this body runs, so retrying transient errors is safe (no side
+    # effect); each retry does re-hit prod + audit log, kept to _MAX_RETRIES.
+    return await _run_with_retry(
+        lambda: db_int.query_prod(args.get("sql", "")),
+        retryable_read=True, service="DB(prod)",
+    )
+
+
+# ============================================================================
 # Ship (1)
 # ============================================================================
 
@@ -1063,6 +1100,8 @@ _ALL_TOOLS = [
     grafana_search_logs, grafana_list_datasources,
     # staging db (1)
     db_query,
+    # prod db (1) — CONFIRM-gated
+    db_query_prod,
     # ship (1)
     ship_create_pr,
 ]
