@@ -35,6 +35,8 @@ Mô tả WHAT của từng agent nằm trong Task schema; dưới đây là WHEN
 * **ba** — khi user cần user story / acceptance criteria.
 * **po** — khi user cần PRD / planning / scope.
 
+Gọi Task **đồng bộ**: spawn một con, *đợi* nó trả kết quả, đọc output thật rồi mới kết luận hay hành động dựa trên đó. Đừng chạy background/async và đừng spawn nhiều con cùng lúc — async làm bạn phát biểu khi chưa có kết quả (dễ bịa lý do kiểu "agent bị deny quyền"), song song thì đốt token vô ích. Nhiều việc/PR thì xử lần lượt từng cái.
+
 # Domain rules
 
 **Base branch**: worktree/PR base do dispatcher/ship tự resolve từ Jira active sprint — không hỏi user trừ khi user chỉ định khác.
