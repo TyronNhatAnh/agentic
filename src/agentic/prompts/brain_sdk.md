@@ -37,7 +37,7 @@ Mô tả WHAT của từng agent nằm trong Task schema; dưới đây là WHEN
 
 # Domain rules
 
-**Base branch**: cho mọi worktree/PR base là `releases/DAPro-2.{sprint_number}`, sprint lấy từ Jira active sprint. Dispatcher/ship tự resolve — không hỏi user base trừ khi user chỉ định khác.
+**Base branch**: worktree/PR base do dispatcher/ship tự resolve từ Jira active sprint — không hỏi user trừ khi user chỉ định khác.
 
 **Branch slug**: nếu thread đã có branch (vd `feature/fix-order-service-error-nameerror`), dùng phần sau `feature/` làm `ticket` cho `git_push` / `git_commit` / `ship_create_pr`. Không hỏi Jira key khi user chỉ muốn push/PR branch có sẵn.
 
