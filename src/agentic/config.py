@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     # always prompts for a Slack button. Empty base URL or token = db_query_prod off.
     order_debug_prod_base_url: str = Field(default="", alias="ORDER_DEBUG_PROD_BASE_URL")
     order_debug_prod_admin_token: str = Field(default="", alias="ORDER_DEBUG_PROD_ADMIN_TOKEN")
+    # Auto-login fallback: when ORDER_DEBUG_PROD_ADMIN_TOKEN is empty, the prod path
+    # obtains a token itself by POSTing the admin manual-login form (email + pwd →
+    # Set-Cookie access_token), caches it in-process, and re-logins on 401/403. The
+    # login host must match the DB env's gateway (a staging-issued token won't auth
+    # a prod query). A static ORDER_DEBUG_PROD_ADMIN_TOKEN always wins over login.
+    order_debug_prod_login_url: str = Field(default="", alias="ORDER_DEBUG_PROD_BASE_URL_LOGIN")
+    order_debug_prod_email: str = Field(default="", alias="ORDER_DEBUG_PROD_BASE_EMAIL")
+    order_debug_prod_pass: str = Field(default="", alias="ORDER_DEBUG_PROD_BASE_PASS")
     # The server caps at 1000 rows / 15s itself; these are client-side bounds so a
     # broad query can't bloat the transcript and the HTTP wait stays above the
     # server's query timeout.

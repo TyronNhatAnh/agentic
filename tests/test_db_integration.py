@@ -70,3 +70,104 @@ async def test_query_prod_targets_prod_host_and_token(monkeypatch):
     assert seen["auth"] == "Bearer PRODTOKEN"
     assert seen["ua"]  # browser UA sent so Cloudflare doesn't 1010 the call
     assert "42" in res.display()
+
+
+# --- query_prod auto-login (no static token) -------------------------------
+
+class _Resp:
+    def __init__(self, status_code, *, cookies=None, payload=None, text=""):
+        self.status_code = status_code
+        self.cookies = cookies or {}
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+
+def _fake_client_factory(handler):
+    """Build an httpx.AsyncClient stand-in whose .post delegates to handler(url,
+    data, json), so a test can branch on login vs query URL."""
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def post(self, url, headers=None, data=None, json=None):
+            return handler(url, data, json)
+    return _Client
+
+
+def _configure_login(monkeypatch):
+    monkeypatch.setattr(settings, "order_debug_prod_base_url", "https://prod.example", raising=False)
+    monkeypatch.setattr(settings, "order_debug_prod_admin_token", "", raising=False)  # force login path
+    monkeypatch.setattr(settings, "order_debug_prod_login_url", "https://biz.example/admin/login/menual", raising=False)
+    monkeypatch.setattr(settings, "order_debug_prod_email", "me@x.com", raising=False)
+    monkeypatch.setattr(settings, "order_debug_prod_pass", "secret", raising=False)
+    monkeypatch.setattr(db, "_prod_token_cache", None, raising=False)
+
+
+async def test_query_prod_logs_in_when_no_static_token(monkeypatch):
+    _configure_login(monkeypatch)
+    calls = []
+
+    def handler(url, data, json):
+        calls.append(url)
+        if url.endswith("/login/menual"):
+            assert data == {"email": "me@x.com", "pwd": "secret"}  # form fields
+            return _Resp(302, cookies={"access_token": "MINTED"})
+        return _Resp(200, payload={"rowCount": 1, "rows": [{"n": 1}]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", _fake_client_factory(handler))
+    res = await db.query_prod("SELECT 1")
+    assert res.ok
+    assert any(u.endswith("/login/menual") for u in calls)
+    assert db._prod_token_cache == "MINTED"
+
+
+async def test_query_prod_relogins_on_auth_expiry(monkeypatch):
+    _configure_login(monkeypatch)
+    monkeypatch.setattr(db, "_prod_token_cache", "STALE", raising=False)  # pre-seed expired token
+    state = {"query_calls": 0, "logins": 0}
+
+    def handler(url, data, json):
+        if url.endswith("/login/menual"):
+            state["logins"] += 1
+            return _Resp(302, cookies={"access_token": "FRESH"})
+        state["query_calls"] += 1
+        if state["query_calls"] == 1:
+            return _Resp(401, text="token expired")  # stale token rejected
+        return _Resp(200, payload={"rowCount": 0, "rows": []})
+
+    monkeypatch.setattr(httpx, "AsyncClient", _fake_client_factory(handler))
+    res = await db.query_prod("SELECT 1")
+    assert res.ok
+    assert state["logins"] == 1 and state["query_calls"] == 2
+    assert db._prod_token_cache == "FRESH"
+
+
+async def test_query_prod_login_bad_creds(monkeypatch):
+    _configure_login(monkeypatch)
+
+    def handler(url, data, json):
+        # Login form re-renders (200, no cookie) on wrong creds.
+        return _Resp(200, text="login page")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _fake_client_factory(handler))
+    res = await db.query_prod("SELECT 1")
+    assert not res.ok and res.error_code == "AUTH"
+
+
+async def test_query_prod_needs_login_config(monkeypatch):
+    monkeypatch.setattr(settings, "order_debug_prod_base_url", "https://prod.example", raising=False)
+    monkeypatch.setattr(settings, "order_debug_prod_admin_token", "", raising=False)
+    monkeypatch.setattr(settings, "order_debug_prod_login_url", "", raising=False)
+    monkeypatch.setattr(settings, "order_debug_prod_email", "", raising=False)
+    monkeypatch.setattr(settings, "order_debug_prod_pass", "", raising=False)
+    monkeypatch.setattr(db, "_prod_token_cache", None, raising=False)
+    res = await db.query_prod("SELECT 1")
+    assert not res.ok and res.error_code == "CONFIG"

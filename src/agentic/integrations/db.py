@@ -25,6 +25,7 @@ entry:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -202,13 +203,122 @@ async def query(sql: str) -> ToolResult:
     )
 
 
+# In-process cache for a login-obtained prod token. The manual-login form mints a
+# short-lived JWT; we cache the cookie value and only re-login when a query comes
+# back AUTH (401/403). Lock serializes concurrent logins so one expiry doesn't
+# trigger N parallel form posts.
+_prod_token_cache: str | None = None
+_prod_login_lock = asyncio.Lock()
+
+# Cookie name set by web-admin on manual login (Code.AccessToken = "access_token").
+_LOGIN_COOKIE = "access_token"
+
+
+async def _prod_login() -> tuple[str | None, ToolResult | None]:
+    """POST the admin manual-login form (email + pwd) and return the access_token
+    cookie. Returns (token, None) or (None, failure). VERIFIED contract:
+    web-admin LoginController /login/menual → form fields email/pwd → 302 +
+    Set-Cookie access_token=<jwt> on success, 200 login page (no cookie) on fail.
+    """
+    url = settings.order_debug_prod_login_url
+    payload = {
+        "email": settings.order_debug_prod_email,
+        "pwd": settings.order_debug_prod_pass,
+    }
+    try:
+        # follow_redirects=False: the token cookie is set on the 302 itself; we do
+        # not want to chase /dashboard.
+        async with httpx.AsyncClient(
+            timeout=settings.order_debug_timeout_s, follow_redirects=False
+        ) as client:
+            r = await client.post(
+                url, data=payload, headers={"User-Agent": _BROWSER_UA}
+            )
+    except httpx.TimeoutException:
+        return None, ToolResult.failure(
+            "TIMEOUT", f"Prod admin login timeout (>{settings.order_debug_timeout_s}s).",
+            retryable=True,
+        )
+    except httpx.HTTPError as e:
+        msg = str(e).split("\n", 1)[0]
+        log.warning("prod login http error: %s", msg)
+        return None, ToolResult.failure("NETWORK", f"Prod admin login lỗi mạng: {msg}", retryable=True)
+
+    token = r.cookies.get(_LOGIN_COOKIE)
+    if not token:
+        # No cookie → bad creds or wrong login URL (form re-renders as 200).
+        return None, ToolResult.failure(
+            "AUTH",
+            f"Login {url} không trả cookie access_token (HTTP {r.status_code}) — "
+            "kiểm tra ORDER_DEBUG_PROD_BASE_URL_LOGIN / email / pass.",
+        )
+    return token, None
+
+
+async def _get_prod_token(*, force: bool) -> tuple[str | None, ToolResult | None]:
+    """Return a cached login token, or mint a fresh one. ``force=True`` bypasses
+    the cache (used after an AUTH failure = expired token)."""
+    global _prod_token_cache
+    async with _prod_login_lock:
+        if _prod_token_cache and not force:
+            return _prod_token_cache, None
+        token, err = await _prod_login()
+        if err:
+            return None, err
+        _prod_token_cache = token
+        return token, None
+
+
 async def query_prod(sql: str) -> ToolResult:
     """Run one read-only statement against the PRODUCTION read replica via the
     order-service debug-query admin API. Gated by CONFIRM_TOOLS (Slack button) —
-    hits real customer PII and is audit-logged."""
-    return await _run_query(
-        sql,
-        base_url=settings.order_debug_prod_base_url,
-        token=settings.order_debug_prod_admin_token,
-        base_url_env="ORDER_DEBUG_PROD_BASE_URL",
+    hits real customer PII and is audit-logged.
+
+    Token resolution: a static ORDER_DEBUG_PROD_ADMIN_TOKEN wins; otherwise the
+    prod admin manual-login form is used to mint one (cached, auto-renewed on a
+    401/403)."""
+    base_url = settings.order_debug_prod_base_url
+    if not base_url:
+        return ToolResult.failure(
+            "CONFIG",
+            "Chưa cấu hình ORDER_DEBUG_PROD_BASE_URL. Set host prod rồi thử lại.",
+        )
+
+    static = settings.order_debug_prod_admin_token
+    if static:
+        return await _run_query(
+            sql, base_url=base_url, token=static,
+            base_url_env="ORDER_DEBUG_PROD_BASE_URL",
+        )
+
+    # No static token → auto-login. Guard the SQL once up-front so a bad query
+    # fails fast without a login round-trip.
+    _, err = guard_sql(sql, row_cap=settings.order_debug_row_cap)
+    if err:
+        return err
+    if not (
+        settings.order_debug_prod_login_url
+        and settings.order_debug_prod_email
+        and settings.order_debug_prod_pass
+    ):
+        return ToolResult.failure(
+            "CONFIG",
+            "Chưa cấu hình token prod. Set ORDER_DEBUG_PROD_ADMIN_TOKEN, hoặc bộ "
+            "login ORDER_DEBUG_PROD_BASE_URL_LOGIN / _EMAIL / _PASS.",
+        )
+
+    token, err = await _get_prod_token(force=False)
+    if err:
+        return err
+    res = await _run_query(
+        sql, base_url=base_url, token=token, base_url_env="ORDER_DEBUG_PROD_BASE_URL",
     )
+    # Cached token may have expired → re-login once and retry.
+    if not res.ok and res.error_code == "AUTH":
+        token, err = await _get_prod_token(force=True)
+        if err:
+            return err
+        res = await _run_query(
+            sql, base_url=base_url, token=token, base_url_env="ORDER_DEBUG_PROD_BASE_URL",
+        )
+    return res
