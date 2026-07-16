@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
@@ -37,6 +38,16 @@ from ..store import list_services as _list_services
 from ..integrations.result import ToolResult, classify_exception
 
 log = logging.getLogger(__name__)
+
+# Curated map of the shared legacy `gogovan` schema (naming convention + core
+# tables). Referenced from the db_query* descriptions so the brain Reads it on
+# demand instead of guessing table names from model/struct conventions.
+_DB_TABLES_DOC = Path(__file__).resolve().parents[3] / "docs" / "DB_TABLES.md"
+_DB_SCHEMA_HINT = (
+    f"Before your first query in a session, Read {_DB_TABLES_DOC} — legacy "
+    "naming (table `orderrequest`, not `order_requests`), core tables, `*CD` "
+    "code lookup. "
+)
 
 # Match dispatcher.py:103-104 legacy semantics — read-only verbs retry up to
 # 2 times on transient errors, write verbs never retry (timed-out POST may
@@ -997,6 +1008,7 @@ async def grafana_list_datasources(args: dict[str, Any]) -> dict[str, Any]:
         "read replica via its admin debug-query API and return the rows. Use this "
         "for the *current* schema and config-in-DB values — live introspection is "
         "the source of truth, the legacy `db/schema.rb` is stale. "
+        + _DB_SCHEMA_HINT +
         "Allowed: SELECT / WITH / SHOW / DESCRIBE / EXPLAIN only; mutations, "
         "multi-statements and file access are rejected (client + server guard). "
         "Examples: `SHOW CREATE TABLE orders`, `DESCRIBE orders`, "
@@ -1034,6 +1046,7 @@ async def db_query(args: dict[str, Any]) -> dict[str, Any]:
         "Prefer db_query (staging) whenever the data exists on staging; only reach "
         "for prod to diagnose a live incident, verify prod-only records, or confirm "
         "a data fix. Filter tightly — never `SELECT *` on broad tables. "
+        + _DB_SCHEMA_HINT +
         "Allowed: SELECT / WITH / SHOW / DESCRIBE / EXPLAIN only; mutations, "
         "multi-statements and file access are rejected (client + server guard). "
         "A bare SELECT without LIMIT is capped automatically."
