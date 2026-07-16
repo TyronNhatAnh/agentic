@@ -62,8 +62,7 @@ def build_subagents() -> dict[str, AgentDefinition]:
     return {
         "po": AgentDefinition(
             description=(
-                "Product Owner — viết PRD, scope, milestones, definition of "
-                "done. Dùng khi user xin product brief hoặc planning."
+                "Product Owner — viết PRD, scope, milestones, definition of done."
             ),
             prompt=load_prompt("po"),
             tools=[],
@@ -72,7 +71,7 @@ def build_subagents() -> dict[str, AgentDefinition]:
         "ba": AgentDefinition(
             description=(
                 "Business Analyst — viết user story + acceptance criteria "
-                "(Given/When/Then). Dùng khi user xin story cho feature."
+                "(Given/When/Then)."
             ),
             prompt=load_prompt("ba"),
             tools=[],
@@ -81,8 +80,7 @@ def build_subagents() -> dict[str, AgentDefinition]:
         "review": AgentDefinition(
             description=(
                 "Code Reviewer — review PR diff theo template Markdown. Có "
-                "thể fetch diff từ GitHub và cross-check file trong worktree. "
-                "Dùng khi đã có PR hoặc patch cụ thể."
+                "thể fetch diff từ GitHub và cross-check file trong worktree."
             ),
             prompt=load_prompt("review"),
             tools=REVIEW_ALLOWED_TOOLS,
@@ -93,8 +91,7 @@ def build_subagents() -> dict[str, AgentDefinition]:
             description=(
                 "Developer — đọc + sửa/viết code trong worktree (edit-only: KHÔNG "
                 "có shell/git/gh). Trả về danh sách file đã đổi + commit message "
-                "gợi ý; người gọi (brain) tự commit/push/mở PR. Dùng khi cần thay "
-                "đổi code cho ticket đã có workspace."
+                "gợi ý; người gọi (brain) tự commit/push/mở PR."
             ),
             prompt=load_prompt("dev"),
             tools=DEV_ALLOWED_TOOLS,
