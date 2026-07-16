@@ -3,15 +3,18 @@
 Tool-lifecycle + compaction hooks bound per Slack thread. They own per-tool
 ``runs`` logging now that the stream loop no longer collects tool records:
 
-- ``PreToolUse``        — stamp a monotonic start keyed by ``tool_use_id``.
+- ``PreToolUse``        — stamp a monotonic start keyed by ``tool_use_id``;
+                          denies raw network git (``git fetch``/``pull``) in
+                          Bash — SSH remote has no key here, see below.
 - ``PostToolUse``       — success: pop the start, compute duration, log an ok row.
 - ``PostToolUseFailure``— failure: same, but status=error (PostToolUse only
                           fires on success, so failures need their own hook).
 - ``PreCompact``        — log-only; the SDK fires this when compaction is
                           already happening, not as an "almost full" forecast.
 
-Hook input is a TypedDict (dict access). Returning ``{}`` is a no-op — these
-hooks observe, they do not alter tool execution or input.
+Hook input is a TypedDict (dict access). Returning ``{}`` is a no-op — apart
+from the raw-net-git deny, these hooks observe, they do not alter tool
+execution or input.
 """
 
 from __future__ import annotations
@@ -42,6 +45,28 @@ _SECRET_RE = re.compile(
 
 def _redact(text: str) -> str:
     return _SECRET_RE.sub("«redacted»", text)
+
+
+# Raw network git via Bash goes to the repo's configured remote (SSH), which
+# has no usable key in the bot's environment — the fetch fails, and when the
+# failure is piped away (`git fetch ... | tail`) later ref reads silently
+# report stale local state. This produced a real wrong answer (da-api "latest"
+# release reported 3 sprints behind, 2026-07-15). Deny and steer to the
+# token-based path; an explicit https:// URL *is* the token path and passes.
+_RAW_NET_GIT_RE = re.compile(r"\bgit\b[^|;&]*\b(fetch|pull)\b")
+_RAW_NET_GIT_REASON = (
+    "Raw `git fetch`/`git pull` dùng remote SSH — môi trường bot không có SSH "
+    "key nên fail hoặc để lại ref cũ. Dùng `mcp__agentic__git_latest_release` "
+    "cho câu hỏi release branch/commit mới nhất, hoặc các tool `git_*`; nếu "
+    "bắt buộc fetch thủ công thì fetch qua URL `https://` với GITHUB_TOKEN."
+)
+
+
+def _deny_raw_net_git(tool_name: str | None, tool_input: Any) -> bool:
+    if tool_name != "Bash" or not isinstance(tool_input, dict):
+        return False
+    command = tool_input.get("command") or ""
+    return bool(_RAW_NET_GIT_RE.search(command)) and "https://" not in command
 
 
 def _preview(payload: Any) -> str:
@@ -78,6 +103,15 @@ def build_brain_hooks(*, thread_ts: str, channel: str) -> dict[str, list[HookMat
             log.exception("hook log_run failed thread=%s", thread_ts)
 
     async def pre_tool(inp: dict, tool_use_id: str | None, ctx: Any) -> dict:
+        if _deny_raw_net_git(inp.get("tool_name"), inp.get("tool_input")):
+            log.warning("denied raw net git thread=%s", thread_ts)
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": _RAW_NET_GIT_REASON,
+                }
+            }
         tid = inp.get("tool_use_id") or tool_use_id
         if tid:
             starts[tid] = time.monotonic()

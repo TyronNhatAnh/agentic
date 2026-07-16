@@ -161,3 +161,39 @@ def test_log_run_persists_usage_columns():
     assert row["output_tokens"] == 20
     assert row["cost_usd"] == 0.05
     assert row["num_turns"] == 2
+
+
+async def test_pre_tool_denies_raw_net_git_in_bash():
+    hooks = build_brain_hooks(thread_ts="t1", channel="C1")
+    pre = hooks["PreToolUse"][0].hooks[0]
+
+    inp = {
+        "tool_name": "Bash",
+        "tool_input": {"command": "cd /repo && git fetch origin --prune | tail -5"},
+        "tool_use_id": "tu_git",
+    }
+    out = await pre(inp, "tu_git", None)
+    spec = out["hookSpecificOutput"]
+    assert spec["permissionDecision"] == "deny"
+    assert "git_latest_release" in spec["permissionDecisionReason"]
+
+    inp["tool_input"] = {"command": "git pull"}
+    assert (await pre(inp, "tu_git", None))["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+async def test_pre_tool_allows_local_git_and_token_fetch():
+    hooks = build_brain_hooks(thread_ts="t1", channel="C1")
+    pre = hooks["PreToolUse"][0].hooks[0]
+
+    for command in (
+        "git log -1 --format='%H' origin/releases/DAPro-2.129",
+        "git for-each-ref --sort=-committerdate 'refs/remotes/origin/releases/*'",
+        'git -c http.extraheader="AUTHORIZATION: bearer $GITHUB_TOKEN" fetch https://github.com/gogovan/ggx-kr-da-api releases/DAPro-2.129',
+        "git diff HEAD~1 | grep fetch",
+    ):
+        inp = {"tool_name": "Bash", "tool_input": {"command": command}, "tool_use_id": "tu_ok"}
+        assert await pre(inp, "tu_ok", None) == {}
+
+    # Non-Bash tools never match, whatever their input looks like.
+    inp = {"tool_name": "Grep", "tool_input": {"pattern": "git fetch"}, "tool_use_id": "tu_g"}
+    assert await pre(inp, "tu_g", None) == {}

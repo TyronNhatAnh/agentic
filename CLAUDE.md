@@ -51,7 +51,7 @@ Tools that aren't in `CONFIRM_TOOLS` and aren't in any `allowed_tools` list stil
 
 [sdk/hooks.py](src/agentic/sdk/hooks.py) `build_brain_hooks(thread_ts, channel)` is wired into the brain options factory per thread:
 
-- `PreToolUse` — stamps a monotonic start keyed by `tool_use_id` (audit; no-op output).
+- `PreToolUse` — stamps a monotonic start keyed by `tool_use_id` (audit), and **denies** raw network git in Bash (`git fetch`/`git pull` without an `https://` URL) — the SSH remote has no key in the bot's env, so those either fail or leave stale refs that later reads report as current; the deny reason steers the brain to `git_latest_release` / token-URL fetch.
 - `PostToolUse` / `PostToolUseFailure` — single-writer for per-tool `runs` rows (ok / error + duration). PostToolUse only fires on success, so failures need their own hook. Secret tokens (`ghp_…`, `xox?-…`, `x-access-token:…`, `//user:pass@…`) are redacted from the logged input preview — audit-only, the tool input itself is not mutated.
 - `PreCompact` — `log.warning(trigger=...)`. The SDK fires this when compaction is already happening (auto-compaction handles long threads natively); it is not an "almost full" forecast and posts nothing to Slack.
 
