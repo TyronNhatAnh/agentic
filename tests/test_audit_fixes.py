@@ -117,7 +117,7 @@ async def test_cap_hit_surfaces_human_message(monkeypatch):
             slack_client=AsyncMock(), placeholder_ts="1.1", thread_history=[],
             workspace_hint=None, pool=pool, pending=PendingPermissions(),
         )
-        assert result.error and "giới hạn an toàn" in result.error, (stop, result.error)
+        assert result.error and "safety limit" in result.error, (stop, result.error)
         assert stop not in result.error  # raw reason must not leak
 
 
@@ -140,7 +140,7 @@ async def test_genuine_result_error_still_surfaced(monkeypatch):
         pool=pool, pending=PendingPermissions(),
     )
     assert result.error == "model từ chối"
-    assert "giới hạn an toàn" not in result.error
+    assert "safety limit" not in result.error
 
 
 async def test_brain_session_timeout_releases_client(monkeypatch):
@@ -160,7 +160,7 @@ async def test_brain_session_timeout_releases_client(monkeypatch):
         pool=pool,
         pending=PendingPermissions(),
     )
-    assert result.error and "hết thời gian" in result.error
+    assert result.error and "timed out" in result.error
     # The half-consumed client must be discarded so the next turn reopens clean.
     assert pool.released == ["T_TIMEOUT"]
 

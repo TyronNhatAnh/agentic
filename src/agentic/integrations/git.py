@@ -134,7 +134,7 @@ async def check_repo(service: str | None = None, repo: str | None = None) -> Too
         target = repo or service or "repo/service"
         return ToolResult.failure(
             "NOT_FOUND",
-            f"Chưa có mapping local cho `{target}` trong service_repos.",
+            f"No local mapping for `{target}` in service_repos.",
         )
 
     # Empty repo_path → Path("") resolves to "." (the bot's own working dir, which
@@ -144,30 +144,30 @@ async def check_repo(service: str | None = None, repo: str | None = None) -> Too
     if not raw_path:
         return ToolResult.failure(
             "CONFIG",
-            f"Service `{svc['name']}` chưa cấu hình `repo_path` (chưa có clone local). "
-            "Set path trong services.json/service_repos trước nhé.",
+            f"Service `{svc['name']}` has no `repo_path` configured (no local clone). "
+            "Set the path in services.json/service_repos first.",
         )
     repo_path = Path(raw_path)
-    github_repo = svc.get("github_repo") or "(chưa set github_repo)"
+    github_repo = svc.get("github_repo") or "(github_repo not set)"
     if not repo_path.is_dir():
         return ToolResult.failure(
             "CONFIG",
-            f"Có mapping `{svc['name']}` → `{repo_path}`, nhưng path chưa tồn tại.",
+            f"Mapping `{svc['name']}` → `{repo_path}` exists, but the path does not.",
         )
     if not Path(repo_path, ".git").exists():
         return ToolResult.failure(
             "CONFIG",
-            f"Có path `{repo_path}`, nhưng không phải git repo.",
+            f"Path `{repo_path}` exists, but is not a git repo.",
         )
 
     rc, branch, _ = await _run_git("branch", "--show-current", cwd=str(repo_path))
     if rc != 0 or not branch:
-        branch = "(detached hoặc không đọc được branch)"
+        branch = "(detached or branch unreadable)"
     rc, status, _ = await _run_git("status", "--porcelain", cwd=str(repo_path))
     dirty = bool(status.strip()) if rc == 0 else None
     dirty_text = "dirty" if dirty else "clean"
     return ToolResult.success(
-        f"Có repo local cho `{github_repo}` nha:\n"
+        f"Local repo for `{github_repo}`:\n"
         f"• Service: `{svc['name']}`\n"
         f"• Path: `{repo_path}`\n"
         f"• Branch: `{branch}`\n"
@@ -201,27 +201,27 @@ async def latest_release_branch(service: str | None = None,
         target = repo or service or "repo/service"
         return ToolResult.failure(
             "NOT_FOUND",
-            f"Chưa có mapping local cho `{target}` trong service_repos.",
+            f"No local mapping for `{target}` in service_repos.",
         )
 
     repo_path = (svc.get("repo_path") or "").strip()
     if not repo_path:
         return ToolResult.failure(
             "CONFIG",
-            f"Service `{svc['name']}` chưa cấu hình `repo_path` (chưa có clone local). "
-            "Set path trong services.json/service_repos trước nhé.",
+            f"Service `{svc['name']}` has no `repo_path` configured (no local clone). "
+            "Set the path in services.json/service_repos first.",
         )
     if not Path(repo_path).is_dir() or not Path(repo_path, ".git").exists():
         return ToolResult.failure(
             "CONFIG",
-            f"Repo path `{repo_path}` chưa tồn tại hoặc chưa phải git repo.",
+            f"Repo path `{repo_path}` does not exist or is not a git repo.",
         )
 
     if not settings.github_token:
         return ToolResult.failure(
             "CONFIG",
-            "GITHUB_TOKEN chưa set — không fetch được qua HTTPS, và SSH không dùng "
-            "được trong sandbox. Set GITHUB_TOKEN để đọc state remote mới nhất.",
+            "GITHUB_TOKEN not set — can't fetch over HTTPS, and SSH doesn't work "
+            "in the sandbox. Set GITHUB_TOKEN to read the latest remote state.",
         )
 
     fetch_url, authed_env = await _authed_remote_url(repo_path)
@@ -229,7 +229,7 @@ async def latest_release_branch(service: str | None = None,
         # Remote isn't a github URL we can rewrite to HTTPS+token.
         return ToolResult.failure(
             "CONFIG",
-            "Remote origin không phải github URL rewrite được sang HTTPS+token.",
+            "Remote origin is not a github URL that can be rewritten to HTTPS+token.",
         )
     # Explicit refspec → remote-tracking refs get updated (not just FETCH_HEAD).
     rc, _, err = await _run_git(
@@ -239,7 +239,7 @@ async def latest_release_branch(service: str | None = None,
         cwd=repo_path, env=authed_env,
     )
     if rc != 0:
-        return ToolResult.failure("GIT_FETCH", f"git fetch lỗi: {err[:200]}")
+        return ToolResult.failure("GIT_FETCH", f"git fetch error: {err[:200]}")
 
     fmt = "%(refname:short)%09%(objectname)%09%(objectname:short)%09%(committerdate:iso8601)%09%(authorname)%09%(contents:subject)"
     rc, out, _ = await _run_git(
@@ -250,7 +250,7 @@ async def latest_release_branch(service: str | None = None,
     if rc != 0 or not lines:
         return ToolResult.failure(
             "NOT_FOUND",
-            f"Không thấy branch `releases/*` nào trên origin của `{svc['name']}`.",
+            f"No `releases/*` branch found on origin of `{svc['name']}`.",
         )
     parts = lines[0].split("\t")
     branch = parts[0].removeprefix("origin/")
@@ -261,12 +261,12 @@ async def latest_release_branch(service: str | None = None,
     subject = parts[5] if len(parts) > 5 else ""
     github_repo = (svc.get("github_repo") or "").strip()
     return ToolResult.success(
-        f"Release branch mới nhất của `{svc['name']}`"
+        f"Latest release branch of `{svc['name']}`"
         f"{f' ({github_repo})' if github_repo else ''}: `{branch}`\n"
         f"• Commit: `{full_sha}` (short `{short_sha}`)\n"
         f"• Message: {subject}\n"
         f"• Author: {author} — {date}\n"
-        f"(fetch tươi qua HTTPS+token, đã cập nhật ref remote)"
+        f"(fresh fetch over HTTPS+token, remote refs updated)"
     )
 
 
@@ -284,7 +284,7 @@ async def _resolve_base_branch(service: dict) -> str:
     sprint = await jira_int.get_active_sprint(board_id or None)
     if sprint["number"] is None:
         raise RuntimeError(
-            f"Không parse được sprint number từ tên `{sprint['name']}`"
+            f"Could not parse sprint number from name `{sprint['name']}`"
         )
     return template.replace("{sprint}", str(sprint["number"]))
 
@@ -293,35 +293,35 @@ async def prepare_workspace(service: str, ticket: str,
                             confirmed: bool = False) -> ToolResult:
     if not _TICKET_RE.match(ticket):
         return ToolResult.failure(
-            "VALIDATION", f"Ticket key `{ticket}` không hợp lệ (cần dạng ABC-123)."
+            "VALIDATION", f"Ticket key `{ticket}` is invalid (expected form ABC-123)."
         )
     svc = resolve_service(service)
     if not svc:
         return ToolResult.failure(
             "NOT_FOUND",
-            f"Không tìm thấy service `{service}` trong mapping. "
-            f"Kiểm tra bảng service_repos.",
+            f"Service `{service}` not found in mapping. "
+            f"Check the service_repos table.",
         )
     repo_path = (svc.get("repo_path") or "").strip()
     if not repo_path:
         # Empty path would become Path(".") = the bot's own repo; never fetch/worktree there.
         return ToolResult.failure(
             "CONFIG",
-            f"Service `{svc['name']}` chưa cấu hình `repo_path` (chưa có clone local). "
-            "Set path trong services.json/service_repos trước nhé.",
+            f"Service `{svc['name']}` has no `repo_path` configured (no local clone). "
+            "Set the path in services.json/service_repos first.",
         )
     if not Path(repo_path).is_dir() or not Path(repo_path, ".git").exists():
         return ToolResult.failure(
             "CONFIG",
-            f"Repo path `{repo_path}` chưa tồn tại hoặc chưa phải git repo. "
-            f"Clone trước đi nhé.",
+            f"Repo path `{repo_path}` does not exist or is not a git repo. "
+            f"Clone it first.",
         )
 
     # 1. Fetch
     fetch_url, authed_env = await _authed_remote_url(repo_path)
     rc, _, err = await _run_git("fetch", fetch_url, "--prune", cwd=repo_path, env=authed_env)
     if rc != 0:
-        return ToolResult.failure("GIT_FETCH", f"git fetch lỗi: {err[:200]}")
+        return ToolResult.failure("GIT_FETCH", f"git fetch error: {err[:200]}")
 
     # 2. Resolve base branch
     try:
@@ -344,8 +344,8 @@ async def prepare_workspace(service: str, ticket: str,
                 "feature_branch": feature_branch,
                 "worktree_path": str(existing),
                 "message": (
-                    f"📂 Worktree đã có sẵn tại `{existing}` "
-                    f"(branch `{feature_branch}`). Vào đó code tiếp nha."
+                    f"📂 Worktree already exists at `{existing}` "
+                    f"(branch `{feature_branch}`). Continue coding there."
                 ),
             }
         )
@@ -366,15 +366,15 @@ async def prepare_workspace(service: str, ticket: str,
         if not latest:
             return ToolResult.failure(
                 "NOT_FOUND",
-                f"Không thấy base `{base}` cũng không thấy branch `releases/*` nào trên origin.",
+                f"Neither base `{base}` nor any `releases/*` branch found on origin.",
             )
         if not confirmed:
             return _needs_confirmation(
                 service=svc["name"], ticket=ticket, base=latest,
                 question=(
-                    f"Base `{base}` không tồn tại trên origin. "
-                    f"Branch release mới nhất là `{latest}` — checkout từ đây nhé? "
-                    f"(reply: ok / không)"
+                    f"Base `{base}` does not exist on origin. "
+                    f"Latest release branch is `{latest}` — checkout from here? "
+                    f"(reply: ok / no)"
                 ),
             )
         base = latest
@@ -382,8 +382,8 @@ async def prepare_workspace(service: str, ticket: str,
         return _needs_confirmation(
             service=svc["name"], ticket=ticket, base=base,
             question=(
-                f"Base `{base}` chưa có local (chỉ có trên origin). "
-                f"Pull về và checkout worktree mới? (reply: ok / không)"
+                f"Base `{base}` not present locally (only on origin). "
+                f"Pull it down and checkout a new worktree? (reply: ok / no)"
             ),
         )
 
@@ -403,7 +403,7 @@ async def prepare_workspace(service: str, ticket: str,
             cwd=repo_path,
         )
     if rc != 0:
-        return ToolResult.failure("GIT_WORKTREE", f"git worktree add lỗi: {err[:300]}")
+        return ToolResult.failure("GIT_WORKTREE", f"git worktree add error: {err[:300]}")
 
     return ToolResult.success(
         {
@@ -413,12 +413,12 @@ async def prepare_workspace(service: str, ticket: str,
             "feature_branch": feature_branch,
             "worktree_path": str(worktree_path),
             "message": (
-                f"✅ Worktree sẵn sàng:\n"
+                f"✅ Worktree ready:\n"
                 f"• Service: `{svc['name']}`\n"
                 f"• Base: `{base}`\n"
                 f"• Branch: `{feature_branch}`\n"
                 f"• Path: `{worktree_path}`\n"
-                f"`cd {worktree_path}` để bắt đầu code."
+                f"`cd {worktree_path}` to start coding."
             ),
         }
     )
@@ -427,25 +427,25 @@ async def prepare_workspace(service: str, ticket: str,
 async def commit_branch(service: str, ticket: str, message: str,
                         confirmed: bool = False) -> ToolResult:
     if not message.strip():
-        return ToolResult.failure("VALIDATION", "Commit message không được rỗng.")
+        return ToolResult.failure("VALIDATION", "Commit message must not be empty.")
     svc = resolve_service(service)
     if not svc:
         return ToolResult.failure(
-            "NOT_FOUND", f"Không tìm thấy service `{service}` trong mapping."
+            "NOT_FOUND", f"Service `{service}` not found in mapping."
         )
     worktree_path = await resolve_existing_worktree(svc, ticket)
     if not worktree_path:
         return ToolResult.failure(
             "NOT_FOUND",
-            f"Chưa có worktree cho `feature/{ticket}`. Chạy `git.prepare_workspace` trước.",
+            f"No worktree for `feature/{ticket}`. Run `git.prepare_workspace` first.",
         )
 
     rc, status, err = await _run_git("status", "--porcelain", cwd=str(worktree_path))
     if rc != 0:
-        return ToolResult.failure("GIT_STATUS", f"git status lỗi: {err[:200]}")
+        return ToolResult.failure("GIT_STATUS", f"git status error: {err[:200]}")
     if not status.strip():
         return ToolResult.failure(
-            "VALIDATION", f"Worktree `{worktree_path}` sạch, không có gì để commit."
+            "VALIDATION", f"Worktree `{worktree_path}` is clean, nothing to commit."
         )
 
     if not confirmed:
@@ -453,10 +453,10 @@ async def commit_branch(service: str, ticket: str, message: str,
         preview = "\n".join(lines[:20])
         more = f"\n…(+{len(lines) - 20} files)" if len(lines) > 20 else ""
         question = (
-            f"Commit trong worktree `{worktree_path}`?\n"
+            f"Commit in worktree `{worktree_path}`?\n"
             f"Message:\n> {message}\n"
             f"Files:\n```\n{preview}{more}\n```\n"
-            f"(reply: ok / không)"
+            f"(reply: ok / no)"
         )
         res = ToolResult.failure("NEEDS_CONFIRMATION", question)
         res.data = {
@@ -468,14 +468,14 @@ async def commit_branch(service: str, ticket: str, message: str,
 
     rc, _, err = await _run_git("add", "-A", cwd=str(worktree_path))
     if rc != 0:
-        return ToolResult.failure("GIT_ADD", f"git add lỗi: {err[:200]}")
+        return ToolResult.failure("GIT_ADD", f"git add error: {err[:200]}")
     rc, _, err = await _run_git("commit", "-m", message, cwd=str(worktree_path))
     if rc != 0:
-        return ToolResult.failure("GIT_COMMIT", f"git commit lỗi: {err[:300]}")
+        return ToolResult.failure("GIT_COMMIT", f"git commit error: {err[:300]}")
     rc, sha, _ = await _run_git("rev-parse", "HEAD", cwd=str(worktree_path))
     sha_short = (sha or "?")[:7]
     return ToolResult.success(
-        f"✅ Commit `{sha_short}` trong `{worktree_path}`."
+        f"✅ Commit `{sha_short}` in `{worktree_path}`."
     )
 
 
@@ -483,20 +483,20 @@ async def push_branch(service: str, ticket: str) -> ToolResult:
     svc = resolve_service(service)
     if not svc:
         return ToolResult.failure(
-            "NOT_FOUND", f"Không tìm thấy service `{service}` trong mapping."
+            "NOT_FOUND", f"Service `{service}` not found in mapping."
         )
     worktree_path = await resolve_existing_worktree(svc, ticket)
     if not worktree_path:
         return ToolResult.failure(
             "NOT_FOUND",
-            f"Chưa có worktree cho `feature/{ticket}`. Chạy `git.prepare_workspace` trước.",
+            f"No worktree for `feature/{ticket}`. Run `git.prepare_workspace` first.",
         )
     feature_branch = f"feature/{ticket}"
     push_url, authed_env = await _authed_remote_url(str(worktree_path))
     rc, _, err = await _run_git("push", "-u", push_url, feature_branch, cwd=str(worktree_path), env=authed_env)
     if rc != 0:
-        return ToolResult.failure("GIT_PUSH", f"git push lỗi: {err[:300]}")
-    return ToolResult.success(f"✅ Pushed `{feature_branch}` lên origin.")
+        return ToolResult.failure("GIT_PUSH", f"git push error: {err[:300]}")
+    return ToolResult.success(f"✅ Pushed `{feature_branch}` to origin.")
 
 
 async def prepare_pr_review_workspace(repo: str, pr: int) -> ToolResult:
@@ -508,7 +508,7 @@ async def prepare_pr_review_workspace(repo: str, pr: int) -> ToolResult:
     if not svc:
         return ToolResult.failure(
             "NOT_FOUND",
-            f"Không tìm thấy local repo mapping cho `{repo}` trong service_repos.",
+            f"No local repo mapping found for `{repo}` in service_repos.",
         )
 
     repo_path = (svc.get("repo_path") or "").strip()
@@ -516,24 +516,24 @@ async def prepare_pr_review_workspace(repo: str, pr: int) -> ToolResult:
         # Empty path would become Path(".") = the bot's own repo; never fetch/worktree there.
         return ToolResult.failure(
             "CONFIG",
-            f"Service `{svc['name']}` chưa cấu hình `repo_path` (chưa có clone local). "
-            "Set path trong services.json/service_repos trước nhé.",
+            f"Service `{svc['name']}` has no `repo_path` configured (no local clone). "
+            "Set the path in services.json/service_repos first.",
         )
     if not Path(repo_path).is_dir() or not Path(repo_path, ".git").exists():
         return ToolResult.failure(
             "CONFIG",
-            f"Repo path `{repo_path}` chưa tồn tại hoặc chưa phải git repo.",
+            f"Repo path `{repo_path}` does not exist or is not a git repo.",
         )
 
     fetch_ref = f"pull/{pr}/head"
     fetch_url, authed_env = await _authed_remote_url(repo_path)
     rc, _, err = await _run_git("fetch", fetch_url, fetch_ref, cwd=repo_path, env=authed_env)
     if rc != 0:
-        return ToolResult.failure("GIT_FETCH", f"git fetch `{fetch_ref}` lỗi: {err[:300]}")
+        return ToolResult.failure("GIT_FETCH", f"git fetch `{fetch_ref}` error: {err[:300]}")
 
     rc, sha, err = await _run_git("rev-parse", "--verify", "FETCH_HEAD", cwd=repo_path)
     if rc != 0 or not sha:
-        return ToolResult.failure("GIT_FETCH", f"Không resolve được FETCH_HEAD: {err[:300]}")
+        return ToolResult.failure("GIT_FETCH", f"Could not resolve FETCH_HEAD: {err[:300]}")
 
     base = (settings.worktree_dir or "").strip()
     if base:
@@ -544,26 +544,26 @@ async def prepare_pr_review_workspace(repo: str, pr: int) -> ToolResult:
         if not Path(worktree_path, ".git").exists():
             return ToolResult.failure(
                 "CONFIG",
-                f"Path review `{worktree_path}` đã tồn tại nhưng không phải git worktree.",
+                f"Review path `{worktree_path}` already exists but is not a git worktree.",
             )
         rc, status, err = await _run_git("status", "--porcelain", cwd=str(worktree_path))
         if rc != 0:
-            return ToolResult.failure("GIT_STATUS", f"git status lỗi: {err[:300]}")
+            return ToolResult.failure("GIT_STATUS", f"git status error: {err[:300]}")
         if status.strip():
             return ToolResult.failure(
                 "DIRTY_WORKTREE",
-                f"Review worktree `{worktree_path}` đang có thay đổi local, không tự checkout.",
+                f"Review worktree `{worktree_path}` has local changes, not auto-checking out.",
             )
         rc, _, err = await _run_git("checkout", "--detach", sha, cwd=str(worktree_path))
         if rc != 0:
-            return ToolResult.failure("GIT_CHECKOUT", f"git checkout PR head lỗi: {err[:300]}")
+            return ToolResult.failure("GIT_CHECKOUT", f"git checkout PR head error: {err[:300]}")
     else:
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
         rc, _, err = await _run_git(
             "worktree", "add", "--detach", str(worktree_path), sha, cwd=repo_path
         )
         if rc != 0:
-            return ToolResult.failure("GIT_WORKTREE", f"git worktree add lỗi: {err[:300]}")
+            return ToolResult.failure("GIT_WORKTREE", f"git worktree add error: {err[:300]}")
 
     return ToolResult.success(
         {

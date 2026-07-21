@@ -145,7 +145,7 @@ def build_slack_permission_callback(
         if tool_scope is not None and tool_name not in tool_scope and bare not in tool_scope:
             return PermissionResultDeny(
                 behavior="deny",
-                message=f"`{bare}` ngoài scope của channel này",
+                message=f"`{bare}` is outside this channel's scope",
             )
 
         if not _needs_confirm(tool_name, tool_input):
@@ -167,14 +167,14 @@ def build_slack_permission_callback(
             await slack_client.chat_postMessage(
                 channel=channel_id,
                 thread_ts=thread_ts,
-                text=f"❓ Cho phép `{tool_name}` chạy?",
+                text=f"❓ Allow `{tool_name}` to run?",
                 blocks=[
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
                             "text": (
-                                f"❓ Cho phép tool *{tool_name}* chạy?\n"
+                                f"❓ Allow the *{tool_name}* tool to run?\n"
                                 f"```{input_preview}```"
                             ),
                         },
@@ -186,14 +186,14 @@ def build_slack_permission_callback(
                             {
                                 "type": "button",
                                 "action_id": "perm_allow",
-                                "text": {"type": "plain_text", "text": "✅ Cho phép"},
+                                "text": {"type": "plain_text", "text": "✅ Allow"},
                                 "style": "primary",
                                 "value": req_id,
                             },
                             {
                                 "type": "button",
                                 "action_id": "perm_deny",
-                                "text": {"type": "plain_text", "text": "❌ Huỷ"},
+                                "text": {"type": "plain_text", "text": "❌ Cancel"},
                                 "style": "danger",
                                 "value": req_id,
                             },
@@ -206,7 +206,7 @@ def build_slack_permission_callback(
             pending.pop(req_id)
             return PermissionResultDeny(
                 behavior="deny",
-                message="không gửi được prompt confirm lên Slack",
+                message="could not send the confirm prompt to Slack",
             )
 
         try:
@@ -215,11 +215,11 @@ def build_slack_permission_callback(
             pending.pop(req_id)
             return PermissionResultDeny(
                 behavior="deny",
-                message=f"timeout {timeout_s}s — không có phản hồi",
+                message=f"timeout {timeout_s}s — no response",
             )
 
         if allow:
             return PermissionResultAllow(behavior="allow", updated_input=tool_input)
-        return PermissionResultDeny(behavior="deny", message="user huỷ")
+        return PermissionResultDeny(behavior="deny", message="user cancelled")
 
     return cb

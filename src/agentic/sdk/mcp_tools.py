@@ -581,7 +581,7 @@ async def jira_search(args: dict[str, Any]) -> dict[str, Any]:
     return await _run_with_retry(
         lambda: jira_int.search_jql(
             args["jql"], int(args.get("max_results", 20)),
-            args.get("kind", "Kết quả"),
+            args.get("kind", "Results"),
         ),
         retryable_read=True, service="Jira",
     )
@@ -589,7 +589,11 @@ async def jira_search(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "jira_create_issue",
-    "Create a new Jira issue.",
+    "Create a new Jira issue. `description` is business/functional content in "
+    "English — problem, scenarios/cases (Given/When/Then), acceptance criteria — "
+    "NOT code or implementation detail; use blank lines for paragraphs, `- ` for "
+    "bullets, `# ` for headings. Pass `mentions` to @-notify people (accountId + "
+    "name); resolve unknowns with jira_search_users.",
     {
         "type": "object",
         "properties": {
@@ -597,6 +601,18 @@ async def jira_search(args: dict[str, Any]) -> dict[str, Any]:
             "description": {"type": "string"},
             "project": {"type": "string"},
             "issue_type": {"type": "string"},
+            "mentions": {
+                "type": "array",
+                "description": "People to @-mention in the ticket body (cc line).",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string"},
+                        "name": {"type": "string"},
+                    },
+                    "required": ["account_id"],
+                },
+            },
         },
         "required": ["summary"],
     },
@@ -606,8 +622,43 @@ async def jira_create_issue(args: dict[str, Any]) -> dict[str, Any]:
         lambda: jira_int.create_issue(
             args["summary"], args.get("description", ""),
             args.get("project"), args.get("issue_type", "Task"),
+            args.get("mentions"),
         ),
         retryable_read=False, service="Jira",
+    )
+
+
+@tool(
+    "jira_list_team",
+    "Get the KR team roster (role → name → accountId) — use to resolve who a "
+    "role means (PM / QA / tech lead / BE senior / reporter) before @-mentioning "
+    "them via jira_create_issue `mentions`. People outside the roster: use "
+    "jira_search_users.",
+    {"type": "object", "properties": {}},
+)
+async def jira_list_team(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.list_team(), retryable_read=True, service="Jira",
+    )
+
+
+@tool(
+    "jira_search_users",
+    "Search Jira users by name or email → accountId, for @-mentions or assignment "
+    "when a person is not in the brain's built-in team roster.",
+    {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Name or email fragment."},
+            "max_results": {"type": "integer"},
+        },
+        "required": ["query"],
+    },
+)
+async def jira_search_users(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: jira_int.search_users(args["query"], args.get("max_results", 10)),
+        retryable_read=True, service="Jira",
     )
 
 
@@ -705,7 +756,7 @@ async def list_services(args: dict[str, Any]) -> dict[str, Any]:
     import json as _json
     rows = _list_services()
     if not rows:
-        return _ok("(service registry rỗng)")
+        return _ok("(service registry empty)")
     lines = []
     for s in rows:
         try:
@@ -1120,11 +1171,11 @@ _ALL_TOOLS = [
     github_list_my_prs, github_list_prs, github_list_issues,
     github_list_notifications, github_search,
     github_get_pr, github_get_pr_diff,
-    # jira (12)
+    # jira (14)
     jira_list_my_issues, jira_list_my_in_progress, jira_list_my_sprint,
     jira_list_project_in_progress, jira_get_issue, jira_get_comments, jira_search,
     jira_create_issue, jira_comment_issue, jira_assign_issue,
-    jira_list_transitions, jira_transition_issue,
+    jira_list_transitions, jira_transition_issue, jira_search_users, jira_list_team,
     # registry (1)
     list_services,
     # git (6)

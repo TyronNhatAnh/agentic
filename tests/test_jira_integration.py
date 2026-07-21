@@ -110,7 +110,7 @@ async def test_get_comments_renders_last_oldest_to_newest(monkeypatch):
     text = res.data
     assert text.index("older") < text.index("newer")  # oldest first
     assert "Alice" in text and "Bob" in text
-    assert "(tổng 7)" in text  # total > shown
+    assert "(total 7)" in text  # total > shown
 
 
 @pytest.mark.asyncio
@@ -119,4 +119,4 @@ async def test_get_comments_empty(monkeypatch):
     monkeypatch.setattr(jira, "_client", lambda: _FakeClient({"total": 0, "comments": []}, {}))
     res = await get_comments("KRP-1")
     assert res.ok
-    assert "chưa có comment" in res.data
+    assert "no comments yet" in res.data

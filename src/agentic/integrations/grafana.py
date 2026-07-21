@@ -47,7 +47,7 @@ _ENV_ALIASES = {
 def _norm_env(env: str | None) -> str:
     key = (env or "stag").strip().lower()
     if key not in _ENV_ALIASES:
-        raise ValueError(f"env không hợp lệ: `{env}` (chỉ nhận dev/stag/prod)")
+        raise ValueError(f"invalid env: `{env}` (only dev/stag/prod accepted)")
     return _ENV_ALIASES[key]
 
 
@@ -61,7 +61,7 @@ def _env_conf(env: str | None) -> tuple[str, str, str]:
     if not base or not (settings.grafana_sa_kr or "").strip():
         bucket = "prod" if e == "prod" else "stag"
         raise RuntimeError(
-            f"Grafana {bucket} chưa cấu hình (GRAFANA_SA_KR / GRAFANA_*_BASE_URL)."
+            f"Grafana {bucket} not configured (GRAFANA_SA_KR / GRAFANA_*_BASE_URL)."
         )
     return base.rstrip("/"), uid, e
 
@@ -133,8 +133,8 @@ def _format_streams(
     # resultType "streams" = log lines; "matrix"/"vector" = metric (LogQL aggregation).
     if data.get("resultType") != "streams":
         return (
-            f"_Query `{query}` ({env}) trả về `{data.get('resultType')}` "
-            f"(metric/aggregation), không phải log lines._\n```{json.dumps(result)[:1500]}```"
+            f"_Query `{query}` ({env}) returned `{data.get('resultType')}` "
+            f"(metric/aggregation), not log lines._\n```{json.dumps(result)[:1500]}```"
         )
 
     entries: list[tuple[int, dict, str]] = []
@@ -146,16 +146,16 @@ def _format_streams(
             except (ValueError, TypeError):
                 continue
     if not entries:
-        # Absence-of-evidence trap: a bare "không có log" reads as "no error exists",
+        # Absence-of-evidence trap: a bare "no logs" reads as "no error exists",
         # so the brain stops and clarifies instead of widening. Echo the exact window
         # scanned (the tool's silent `now-1h` default is otherwise invisible to the
         # model) and name the next moves — mirror the capped-path's self-describing tone.
         return (
-            f"_0 dòng khớp `{query}` ({env}) trong `{since}`→`{until}`._\n"
-            "⚠️ Vắng log ≠ không có lỗi — mới là chưa thấy trong window/filter NÀY. "
-            "Đang truy lỗi thì: nới `since` (vd `now-6h`/`now-24h`), bỏ/nới `filter` "
-            "(đừng khoá vào 1 từ khoá đoán), hoặc correlate theo `request_id`/`trace_id`. "
-            'Chỉ kết luận "không có lỗi" sau khi đã quét đủ rộng.'
+            f"_0 lines matched `{query}` ({env}) in `{since}`→`{until}`._\n"
+            "⚠️ No logs ≠ no error — it just means nothing seen in THIS window/filter. "
+            "When chasing a bug: widen `since` (e.g. `now-6h`/`now-24h`), drop/loosen `filter` "
+            "(don't lock onto one guessed keyword), or correlate by `request_id`/`trace_id`. "
+            'Only conclude "no error" after scanning wide enough.'
         )
 
     entries.sort(key=lambda e: e[0], reverse=True)  # newest first
@@ -164,21 +164,21 @@ def _format_streams(
     # len(entries) == limit signals the result was clamped — there were almost certainly
     # more matches outside the returned slice. With direction=backward those rows are the
     # NEWEST, so the slice covers only the tail of [since, until]; the rest was never seen.
-    # Surface both facts: a silent count ("200 dòng") reads as "scanned everything" and
+    # Surface both facts: a silent count ("200 lines") reads as "scanned everything" and
     # makes the brain mark the unscanned span UNKNOWN or guess at time-chunking.
     covered = f"{_fmt_ts(shown[-1][0])}→{_fmt_ts(shown[0][0])} UTC"
     capped = len(entries) >= limit
     head = (
         f"*Grafana/Loki `{env}`* — `{query}` "
-        f"(window `{since}`→`{until}`, {len(shown)} dòng, phủ {covered}):"
+        f"(window `{since}`→`{until}`, {len(shown)} lines, covering {covered}):"
     )
     lines = [head]
     if capped:
         lines.append(
-            f"⚠️ Đạt cap {limit} dòng — direction=backward nên đây là {limit} dòng MỚI NHẤT, "
-            f"chỉ phủ {covered}; phần còn lại của window CHƯA được quét. "
-            "Thu hẹp filter để loại noise volume cao (vd `!= \"...\"`), giảm window, "
-            "hoặc dùng count_over_time/metric query — đừng tăng limit mù (mỗi dòng nằm lại transcript)."
+            f"⚠️ Hit cap of {limit} lines — direction=backward so these are the {limit} NEWEST lines, "
+            f"covering only {covered}; the rest of the window is NOT scanned. "
+            "Narrow the filter to drop high-volume noise (e.g. `!= \"...\"`), shrink the window, "
+            "or use a count_over_time/metric query — don't raise the limit blindly (every line stays in the transcript)."
         )
     for ts_ns, labels, line in shown:
         svc = labels.get("app") or labels.get("service") or labels.get("container") or ""
@@ -207,14 +207,14 @@ def _resolve_query(query: str, service: str, log_filter: str) -> tuple[str | Non
         if not svc:
             return None, ToolResult.failure(
                 "NOT_FOUND",
-                f"Không có service `{service}` trong registry. "
-                "Kiểm tra AGENTIC_SERVICES_JSON hoặc đưa LogQL `query` trực tiếp.",
+                f"No service `{service}` in the registry. "
+                "Check AGENTIC_SERVICES_JSON or pass a LogQL `query` directly.",
             )
         selector = (svc.get("loki_selector") or "").strip()
         if not selector:
             return None, ToolResult.failure(
                 "CONFIG",
-                f"Service `{svc['name']}` chưa cấu hình `loki_selector` trong registry.",
+                f"Service `{svc['name']}` has no `loki_selector` configured in the registry.",
             )
         if log_filter and log_filter.strip():
             f = log_filter.strip()
@@ -226,16 +226,16 @@ def _resolve_query(query: str, service: str, log_filter: str) -> tuple[str | Non
             if not f.startswith(("|=", "|~", "!=", "!~", "|")):
                 return None, ToolResult.failure(
                     "VALIDATION",
-                    f"`filter` phải là LogQL line filter, không phải biểu thức tìm kiếm. "
-                    f"Nhận được: `{f[:120]}`.\n"
-                    'Đúng: `|= "error"` · nhiều term AND: `|= "error" |= "500"` · '
+                    f"`filter` must be a LogQL line filter, not a search expression. "
+                    f"Got: `{f[:120]}`.\n"
+                    'Correct: `|= "error"` · multiple AND terms: `|= "error" |= "500"` · '
                     'OR/case-insensitive: `|~ "(?i)error|exception|fatal|500"`. '
-                    "LogQL không có toán tử `OR` hay cú pháp `level:error`.",
+                    "LogQL has no `OR` operator or `level:error` syntax.",
                 )
             selector = f"{selector} {f}"
         return selector, None
     return None, ToolResult.failure(
-        "VALIDATION", "Cần `query` (LogQL) hoặc `service` (tên service trong registry)."
+        "VALIDATION", "Need `query` (LogQL) or `service` (service name in the registry)."
     )
 
 
@@ -259,9 +259,9 @@ async def search_logs(
     if not uid:
         return ToolResult.failure(
             "CONFIG",
-            f"Thiếu Loki datasource UID cho `{env}` "
-            f"(set GRAFANA_{env.upper()}_LOKI_UID hoặc truyền `datasource_uid`). "
-            "Dùng `grafana.list_datasources` để tìm UID.",
+            f"Missing Loki datasource UID for `{env}` "
+            f"(set GRAFANA_{env.upper()}_LOKI_UID or pass `datasource_uid`). "
+            "Use `grafana.list_datasources` to find the UID.",
         )
     limit = max(1, min(int(limit), _MAX_LIMIT))
     try:
@@ -269,8 +269,8 @@ async def search_logs(
     except (ValueError, KeyError):
         return ToolResult.failure(
             "VALIDATION",
-            f"Khoảng thời gian không hợp lệ (since=`{since}`, until=`{until}`). "
-            "Dùng `now`, `now-15m`/`now-1h`/`now-24h`, hoặc RFC3339.",
+            f"Invalid time range (since=`{since}`, until=`{until}`). "
+            "Use `now`, `now-15m`/`now-1h`/`now-24h`, or RFC3339.",
         )
     params = {
         "query": query,
@@ -295,7 +295,7 @@ async def search_logs(
                 "content-type", ""
             ).startswith("application/json") else r.text
             return ToolResult.failure(
-                "VALIDATION", f"Loki từ chối query (LogQL sai?): {str(detail)[:300]}"
+                "VALIDATION", f"Loki rejected the query (bad LogQL?): {str(detail)[:300]}"
             )
         r.raise_for_status()
         payload = r.json()
@@ -315,8 +315,8 @@ async def list_datasources(env: str = "stag") -> ToolResult:
         r.raise_for_status()
         items = r.json()
     if not items:
-        return ToolResult.success(f"_Không có datasource nào trên Grafana `{env}`._")
-    lines = [f"*Datasources Grafana `{env}`* ({len(items)}):"]
+        return ToolResult.success(f"_No datasources on Grafana `{env}`._")
+    lines = [f"*Grafana `{env}` datasources* ({len(items)}):"]
     for d in items:
         flag = " ⭐loki" if d.get("type") == "loki" else ""
         lines.append(f"• `{d.get('type')}` {d.get('name')} — uid `{d.get('uid')}`{flag}")
@@ -369,7 +369,7 @@ async def count_errors(
     metric = f"sum(count_over_time({selector} {_ERROR_FILTER} [{window}]))"
     # High-volume streams (da-api ~1.2M lines/h) force Loki to scan the full window
     # for the line filter; that scan runs ~24s on prod, so 30s timed out intermittently
-    # and surfaced as "không query được Loki". 60s gives headroom without hanging a cycle.
+    # and surfaced as "couldn't query Loki". 60s gives headroom without hanging a cycle.
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.get(

@@ -63,21 +63,21 @@ def guard_sql(sql: str, *, row_cap: int) -> tuple[str | None, ToolResult | None]
     (None, failure). Pure function — unit-tested without a DB connection."""
     raw = (sql or "").strip()
     if not raw:
-        return None, ToolResult.failure("VALIDATION", "SQL rỗng.")
+        return None, ToolResult.failure("VALIDATION", "Empty SQL.")
     body = _strip(raw).rstrip(";").strip()
     if not body:
-        return None, ToolResult.failure("VALIDATION", "SQL rỗng sau khi bỏ comment.")
+        return None, ToolResult.failure("VALIDATION", "Empty SQL after stripping comments.")
     # Reject multiple statements: any `;` left mid-body means a second statement.
     if ";" in body:
         return None, ToolResult.failure(
-            "VALIDATION", "Chỉ cho phép 1 câu lệnh; bỏ phần sau dấu `;`."
+            "VALIDATION", "Only one statement allowed; drop everything after `;`."
         )
     low = body.lower()
     if not low.startswith(_READ_PREFIXES):
         return None, ToolResult.failure(
             "VALIDATION",
-            "Chỉ cho phép câu đọc (SELECT/SHOW/DESCRIBE/EXPLAIN/WITH). "
-            "Tool này read-only.",
+            "Only read statements allowed (SELECT/SHOW/DESCRIBE/EXPLAIN/WITH). "
+            "This tool is read-only.",
         )
     # Append a LIMIT to bare SELECT/WITH so a query can't dump an entire table.
     # SHOW/DESCRIBE/EXPLAIN are inherently bounded, so they're left alone.
@@ -127,17 +127,17 @@ def _map_http_error(status: int, body: str, *, base_url_env: str) -> ToolResult:
     if status in (401, 403):
         return ToolResult.failure(
             "AUTH",
-            f"Debug query API {status}: {snippet or 'token hết hạn / không có quyền AdminUser'}.",
+            f"Debug query API {status}: {snippet or 'token expired / no AdminUser permission'}.",
         )
     if status == 404:
         return ToolResult.failure(
             "CONFIG",
-            f"Debug query API 404: route không tồn tại — kiểm tra {base_url_env} "
-            "trỏ đúng host + service đã deploy debug endpoint.",
+            f"Debug query API 404: route not found — check {base_url_env} "
+            "points to the right host + the service has deployed the debug endpoint.",
         )
     if status == 400:
         return ToolResult.failure(
-            "VALIDATION", f"Debug query API từ chối: {snippet or 'query không hợp lệ'}."
+            "VALIDATION", f"Debug query API rejected: {snippet or 'invalid query'}."
         )
     return ToolResult.failure(
         "SERVER", f"Debug query API {status}: {snippet}", retryable=status >= 500
@@ -150,8 +150,8 @@ async def _run_query(sql: str, *, base_url: str, token: str, base_url_env: str) 
     if not (base_url and token):
         return ToolResult.failure(
             "CONFIG",
-            f"Chưa cấu hình {base_url_env} / token tương ứng. "
-            "Set host + admin token (role AdminUser) rồi thử lại.",
+            f"{base_url_env} / matching token not configured. "
+            "Set host + admin token (AdminUser role) then retry.",
         )
     safe, err = guard_sql(sql, row_cap=settings.order_debug_row_cap)
     if err:
@@ -170,13 +170,13 @@ async def _run_query(sql: str, *, base_url: str, token: str, base_url_env: str) 
         return ToolResult.failure(
             "TIMEOUT",
             f"Debug query API timeout (>{settings.order_debug_timeout_s}s). "
-            "Câu có thể quá nặng — thêm filter/LIMIT.",
+            "Query may be too heavy — add a filter/LIMIT.",
             retryable=True,
         )
     except httpx.HTTPError as e:  # connect/transport errors
         msg = str(e).split("\n", 1)[0]
         log.warning("db_query http error: %s", msg)
-        return ToolResult.failure("NETWORK", f"Gọi debug query API lỗi mạng: {msg}", retryable=True)
+        return ToolResult.failure("NETWORK", f"Debug query API network error: {msg}", retryable=True)
 
     if r.status_code != 200:
         return _map_http_error(r.status_code, r.text, base_url_env=base_url_env)
@@ -185,7 +185,7 @@ async def _run_query(sql: str, *, base_url: str, token: str, base_url_env: str) 
         payload = r.json()
     except ValueError:
         return ToolResult.failure(
-            "SERVER", f"Response không phải JSON: {r.text[:300]}", retryable=True
+            "SERVER", f"Response is not JSON: {r.text[:300]}", retryable=True
         )
     rows = list(payload.get("rows") or [])
     row_count = payload.get("rowCount", len(rows))
@@ -242,15 +242,15 @@ async def _prod_login() -> tuple[str | None, ToolResult | None]:
     except httpx.HTTPError as e:
         msg = str(e).split("\n", 1)[0]
         log.warning("prod login http error: %s", msg)
-        return None, ToolResult.failure("NETWORK", f"Prod admin login lỗi mạng: {msg}", retryable=True)
+        return None, ToolResult.failure("NETWORK", f"Prod admin login network error: {msg}", retryable=True)
 
     token = r.cookies.get(_LOGIN_COOKIE)
     if not token:
         # No cookie → bad creds or wrong login URL (form re-renders as 200).
         return None, ToolResult.failure(
             "AUTH",
-            f"Login {url} không trả cookie access_token (HTTP {r.status_code}) — "
-            "kiểm tra ORDER_DEBUG_PROD_BASE_URL_LOGIN / email / pass.",
+            f"Login {url} did not return access_token cookie (HTTP {r.status_code}) — "
+            "check ORDER_DEBUG_PROD_BASE_URL_LOGIN / email / pass.",
         )
     return token, None
 
@@ -281,7 +281,7 @@ async def query_prod(sql: str) -> ToolResult:
     if not base_url:
         return ToolResult.failure(
             "CONFIG",
-            "Chưa cấu hình ORDER_DEBUG_PROD_BASE_URL. Set host prod rồi thử lại.",
+            "ORDER_DEBUG_PROD_BASE_URL not configured. Set the prod host then retry.",
         )
 
     static = settings.order_debug_prod_admin_token
@@ -303,8 +303,8 @@ async def query_prod(sql: str) -> ToolResult:
     ):
         return ToolResult.failure(
             "CONFIG",
-            "Chưa cấu hình token prod. Set ORDER_DEBUG_PROD_ADMIN_TOKEN, hoặc bộ "
-            "login ORDER_DEBUG_PROD_BASE_URL_LOGIN / _EMAIL / _PASS.",
+            "Prod token not configured. Set ORDER_DEBUG_PROD_ADMIN_TOKEN, or the "
+            "login set ORDER_DEBUG_PROD_BASE_URL_LOGIN / _EMAIL / _PASS.",
         )
 
     token, err = await _get_prod_token(force=False)

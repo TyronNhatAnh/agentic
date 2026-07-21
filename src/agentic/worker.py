@@ -67,10 +67,10 @@ class JobRunner:
                 await job.reply(reply)
             except Exception as e:
                 log.exception("worker %d reply failed", idx)
-                # Placeholder ("Đang xử lý...") sẽ kẹt nếu không update lại.
-                # Thử lần nữa với message ngắn báo lỗi để user biết.
+                # Placeholder ("Processing...") stays stuck if we don't update it.
+                # Retry with a short error message so the user knows.
                 try:
-                    await job.reply(f"❌ Lỗi gửi phản hồi: {type(e).__name__}")
+                    await job.reply(f"❌ Failed to send reply: {type(e).__name__}")
                 except Exception:
                     log.exception("worker %d fallback reply also failed", idx)
             finally:

@@ -24,7 +24,7 @@ def test_format_notable_when_over_threshold() -> None:
     text, notable = monitor._format(svc, [], env="prod", window="1h", threshold=20)
     assert notable is True
     assert "🔴 `order-service`" in text
-    assert "50 log lỗi" in text
+    assert "50 error logs" in text
     # below-threshold service shown only as low-priority context, not as an alert
     assert "user-service` 3" in text
 
@@ -50,7 +50,7 @@ def test_format_flags_failed_queries() -> None:
     svc = [{"name": "order-service", "count": None}]
     text, notable = monitor._format(svc, [], env="prod", window="1h", threshold=20)
     assert notable is False
-    assert "Không query được Loki" in text
+    assert "Couldn't query Loki" in text
     assert "order-service" in text
 
 
@@ -69,7 +69,7 @@ async def test_run_check_aggregates_counts(monkeypatch) -> None:
     monkeypatch.setattr(monitor.grafana, "sample_errors", fake_sample)
     text, notable = await monitor.run_check()
     assert notable is True
-    assert "99 log lỗi" in text
+    assert "99 error logs" in text
     # over-threshold service carries an inline error summary
     assert "3× boom" in text
 
@@ -92,14 +92,14 @@ def test_summarize_groups_across_formats() -> None:
 def test_summarize_fatal_without_inline_message() -> None:
     lines = ["F, [2026-06-23T01:36:30 #48] FATAL -- : [0ef06e17-c013-4ddb-afcb-fb0162b81ee0]"]
     out = monitor._summarize_errors(lines)
-    assert out == ["1× FATAL (stacktrace ở dòng kế — dig bằng request id)"]
+    assert out == ["1× FATAL (stacktrace on the next line — dig by request id)"]
 
 
 def test_format_renders_samples_under_over_service() -> None:
     svc = [{"name": "da-api", "count": 12}]
     samples = {"da-api": ["11× Completed 500 Internal Server Error", "1× FATAL"]}
     text, notable = monitor._format(svc, [], env="prod", window="1h", threshold=5, samples=samples)
-    assert "🔴 `da-api` — 12 log lỗi" in text
+    assert "🔴 `da-api` — 12 error logs" in text
     assert "11× Completed 500" in text
 
 

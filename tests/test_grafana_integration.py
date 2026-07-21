@@ -73,14 +73,14 @@ def _multi_payload(n: int, base_ns: int = 1716711974000000000):
 def test_capped_result_warns_and_shows_window():
     # exactly `limit` rows back => clamped; brain must be told it's truncated + the covered span
     out = grafana._format_streams(_multi_payload(5), query='{job="x"}', env="prod", limit=5, since="now-1h", until="now")
-    assert "Đạt cap 5 dòng" in out
-    assert "phủ" in out and "→" in out  # covered window surfaced in header
+    assert "Hit cap of 5 lines" in out
+    assert "covering" in out and "→" in out  # covered window surfaced in header
 
 
 def test_uncapped_result_no_warning():
     out = grafana._format_streams(_multi_payload(3), query='{job="x"}', env="prod", limit=50, since="now-1h", until="now")
-    assert "Đạt cap" not in out
-    assert "phủ" in out  # window still shown, just no truncation warning
+    assert "Hit cap" not in out
+    assert "covering" in out  # window still shown, just no truncation warning
 
 
 def test_empty_result_surfaces_window_and_widen_hint():
@@ -90,7 +90,7 @@ def test_empty_result_surfaces_window_and_widen_hint():
         payload, query='{job="x"}', env="prod", limit=50, since="now-1h", until="now"
     )
     assert "now-1h" in out  # exact window echoed, not "khoảng thời gian này"
-    assert "≠ không có lỗi" in out  # absence-of-evidence guard
+    assert "≠ no error" in out  # absence-of-evidence guard
     assert "now-24h" in out or "nới" in out  # widen suggestion
 
 

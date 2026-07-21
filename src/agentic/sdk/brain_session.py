@@ -46,7 +46,7 @@ _STREAM_EDIT_INTERVAL_S = 1.5
 # this marker — its disappearance is the "done" signal. Added inside
 # _safe_placeholder_update (the only streaming-edit site) after truncation so it's
 # never clipped, and adds no extra chat.update calls (§8 2026-05-30 rate-limit guard).
-_STREAM_SUFFIX = "\n\n_⏳ đang xử lý…_"
+_STREAM_SUFFIX = "\n\n_⏳ processing…_"
 
 
 @dataclass
@@ -238,7 +238,7 @@ async def run_brain_session(
                     now = time.monotonic()
                     # Stream the brain's prose once it starts; until then surface
                     # tool activity so the placeholder reflects progress instead of
-                    # freezing on the initial "Đang xử lý…" for the whole tool phase
+                    # freezing on the initial "Processing…" for the whole tool phase
                     # (the brain front-loads Loki/GitHub/git calls before writing).
                     view = "".join(text_parts) or _tool_progress(
                         last_tool_label, tool_use_count
@@ -262,8 +262,8 @@ async def run_brain_session(
         timed_out = True
         log.warning("brain session timed out after %ss thread=%s", deadline, thread_ts)
         error = (
-            f"hết thời gian xử lý ({deadline}s) — phiên đã được reset, "
-            "gửi lại yêu cầu nhé"
+            f"processing timed out ({deadline}s) — the session was reset, "
+            "please resend your request"
         )
     except Exception as e:
         log.exception("brain session stream failed thread=%s", thread_ts)
@@ -295,8 +295,8 @@ async def run_brain_session(
         # partial reply we streamed — the answer is truncated, not lost.
         if (result_msg.stop_reason or "") in {"tool_use", "end_turn", "max_tokens"}:
             error = (
-                "đạt giới hạn an toàn của một lượt (số bước hoặc chi phí) — "
-                "trả lời có thể chưa trọn, nhắn 'tiếp' để mình chạy nốt nhé"
+                "hit the per-turn safety limit (step count or cost) — "
+                "the reply may be incomplete, say 'continue' to finish it"
             )
             log.warning(
                 "brain hit per-turn cap thread=%s stop=%s turns=%s cost=%s",
@@ -340,11 +340,11 @@ def _format_messages(messages: list[dict]) -> str:
         text = (m.get("text") or "").strip()
         line = f"{role}: {text}"
         if len(line) > msg_cap:
-            line = line[:msg_cap] + f"\n…[message cắt bớt {len(line) - msg_cap} ký tự]"
+            line = line[:msg_cap] + f"\n…[message truncated {len(line) - msg_cap} chars]"
         if sum(len(existing) for existing in lines) + len(line) > budget:
             remaining = max(0, budget - sum(len(existing) for existing in lines))
             if remaining > 200:
-                lines.append(line[:remaining] + "\n…[history cắt bớt]")
+                lines.append(line[:remaining] + "\n…[history truncated]")
             break
         lines.append(line)
     return "\n".join(lines)
@@ -359,9 +359,9 @@ def _compose_user_message(
     parts: list[str] = []
     rendered = _format_messages(thread_history or [])
     if rendered:
-        parts.append("## Bối cảnh thread (lịch sử Slack)\n" + rendered)
+        parts.append("## Thread context (Slack history)\n" + rendered)
     if workspace_hint:
-        parts.append("## Workspace hiện tại\n" + workspace_hint.strip())
+        parts.append("## Current workspace\n" + workspace_hint.strip())
     parts.append("---\n" + user_text)
     return "\n\n".join(parts)
 
@@ -376,12 +376,12 @@ def _tool_label(name: str) -> str:
 def _tool_progress(tool_label: str, count: int) -> str:
     """Progress line shown while the brain is calling tools and hasn't emitted
     prose yet. Empty before the first tool, so the placeholder keeps the initial
-    text until there's something real to report. The "đang xử lý…" marker is
+    text until there's something real to report. The "processing…" marker is
     added by _safe_placeholder_update, so it's not repeated here."""
     if not tool_label:
         return ""
-    steps = f" · {count} bước" if count > 1 else ""
-    return f"🔧 đang chạy `{tool_label}`{steps}"
+    steps = f" · {count} steps" if count > 1 else ""
+    return f"🔧 running `{tool_label}`{steps}"
 
 
 async def _safe_placeholder_update(
@@ -407,7 +407,7 @@ async def _safe_placeholder_update(
         await client.chat_update(
             channel=channel,
             ts=ts,
-            text="⏳ đang xử lý…",
+            text="⏳ processing…",
             blocks=[{"type": "markdown", "text": snippet}],
         )
         return 0.0

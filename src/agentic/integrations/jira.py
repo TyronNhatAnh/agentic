@@ -28,13 +28,13 @@ def _issue_key(raw: str) -> str:
 
 def _base() -> str:
     if not settings.jira_base_url:
-        raise RuntimeError("JIRA_BASE_URL chưa cấu hình")
+        raise RuntimeError("JIRA_BASE_URL not configured")
     return settings.jira_base_url.rstrip("/")
 
 
 def _auth() -> tuple[str, str]:
     if not (settings.jira_email and settings.jira_api_token):
-        raise RuntimeError("JIRA_EMAIL / JIRA_API_TOKEN chưa cấu hình")
+        raise RuntimeError("JIRA_EMAIL / JIRA_API_TOKEN not configured")
     return (settings.jira_email, settings.jira_api_token)
 
 
@@ -57,12 +57,100 @@ def _browse_url(key: str) -> str:
     return f"{_base()}/browse/{key}"
 
 
+def _adf_blocks(text: str) -> list[dict]:
+    """Convert plain/markdown-ish text into ADF block nodes.
+
+    A single ``text`` node does not render newlines, so multi-line ticket
+    bodies collapse into one wall of prose. This splits on blank lines into
+    paragraphs, groups ``- ``/``* `` runs into a bulletList, promotes ``# ``
+    lines to headings, and joins remaining lines in a block with hardBreaks —
+    enough structure for a business-logic ticket (scenarios / cases) to read
+    cleanly without a full Markdown parser."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    blocks: list[dict] = []
+    para: list[str] = []
+    bullets: list[str] = []
+
+    def flush_para():
+        if not para:
+            return
+        content: list[dict] = []
+        for idx, ln in enumerate(para):
+            if idx:
+                content.append({"type": "hardBreak"})
+            content.append({"type": "text", "text": ln})
+        blocks.append({"type": "paragraph", "content": content})
+        para.clear()
+
+    def flush_bullets():
+        if not bullets:
+            return
+        blocks.append({
+            "type": "bulletList",
+            "content": [
+                {"type": "listItem",
+                 "content": [{"type": "paragraph",
+                              "content": [{"type": "text", "text": b}]}]}
+                for b in bullets
+            ],
+        })
+        bullets.clear()
+
+    for raw in lines:
+        ln = raw.rstrip()
+        stripped = ln.lstrip()
+        if not stripped:
+            flush_para(); flush_bullets()
+            continue
+        if stripped.startswith(("- ", "* ")):
+            flush_para()
+            bullets.append(stripped[2:].strip())
+            continue
+        flush_bullets()
+        if stripped.startswith("#"):
+            level = len(stripped) - len(stripped.lstrip("#"))
+            heading = stripped[level:].strip()
+            # An empty heading (bare "#"/"# ") would emit a blank ADF text node,
+            # which Jira rejects with 400. Fall back to treating it as prose.
+            if heading:
+                flush_para()
+                blocks.append({
+                    "type": "heading",
+                    "attrs": {"level": min(max(level, 1), 6)},
+                    "content": [{"type": "text", "text": heading}],
+                })
+                continue
+        para.append(stripped)
+    flush_para(); flush_bullets()
+    if not blocks:
+        blocks.append({"type": "paragraph", "content": [{"type": "text", "text": text}]})
+    return blocks
+
+
+def _mention_paragraph(mentions: list[dict]) -> dict | None:
+    """A trailing ``cc: @a @b`` paragraph of ADF mention nodes.
+
+    Each entry is ``{"account_id": str, "name"?: str}``. The ``id`` drives the
+    Jira notification; ``text`` is the raw-text fallback shown in editors that
+    don't hydrate the mention. Entries without an account_id are skipped."""
+    nodes: list[dict] = [{"type": "text", "text": "cc: "}]
+    added = False
+    for m in mentions:
+        aid = (m or {}).get("account_id")
+        if not aid:
+            continue
+        name = (m.get("name") or "").strip()
+        nodes.append({
+            "type": "mention",
+            "attrs": {"id": aid, "text": f"@{name}" if name else "@"},
+        })
+        nodes.append({"type": "text", "text": " "})
+        added = True
+    return {"type": "paragraph", "content": nodes} if added else None
+
+
 def _adf(text: str) -> dict:
-    return {
-        "type": "doc",
-        "version": 1,
-        "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}],
-    }
+    return {"type": "doc", "version": 1, "content": _adf_blocks(text)}
 
 
 def _adf_to_text(node) -> str:
@@ -107,7 +195,7 @@ async def _search_jql(jql: str, label: str, max_results: int = 20) -> ToolResult
         data = r.json()
     issues = data.get("issues", [])
     if not issues:
-        return ToolResult.success(f"_{label}: không có issue nào._")
+        return ToolResult.success(f"_{label}: no issues._")
     lines = [f"*{label}* ({len(issues)}):"]
     lines.extend(_fmt_issue_line(i) for i in issues)
     return ToolResult.success("\n".join(lines))
@@ -118,19 +206,19 @@ async def _search_jql(jql: str, label: str, max_results: int = 20) -> ToolResult
 async def list_my_issues(state: str = "open") -> ToolResult:
     if state == "done":
         jql = "assignee = currentUser() AND statusCategory = Done ORDER BY updated DESC"
-        label = "Issue của bạn (đã done)"
+        label = "Your issues (done)"
     elif state == "all":
         jql = "assignee = currentUser() ORDER BY updated DESC"
-        label = "Issue của bạn (tất cả)"
+        label = "Your issues (all)"
     else:
         jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
-        label = "Issue của bạn (đang mở)"
+        label = "Your issues (open)"
     return await _search_jql(jql, label)
 
 
 async def list_my_in_progress() -> ToolResult:
     jql = 'assignee = currentUser() AND status = "In Progress" ORDER BY updated DESC'
-    return await _search_jql(jql, "Đang làm")
+    return await _search_jql(jql, "In progress")
 
 
 async def list_my_sprint(status: str | None = None) -> ToolResult:
@@ -138,7 +226,7 @@ async def list_my_sprint(status: str | None = None) -> ToolResult:
     if status:
         parts.append(f'status = "{status}"')
     jql = " AND ".join(parts) + " ORDER BY updated DESC"
-    label = f"Sprint hiện tại ({status})" if status else "Sprint hiện tại"
+    label = f"Current sprint ({status})" if status else "Current sprint"
     return await _search_jql(jql, label)
 
 
@@ -146,7 +234,7 @@ async def list_project_in_progress(project: str | None = None) -> ToolResult:
     project = _project(project)
     jql = (f'project = {project} AND status = "In Progress" '
            "ORDER BY updated DESC")
-    return await _search_jql(jql, f"{project} đang làm")
+    return await _search_jql(jql, f"{project} in progress")
 
 
 async def get_issue(key: str) -> ToolResult:
@@ -168,7 +256,7 @@ async def get_issue(key: str) -> ToolResult:
     itype = (f.get("issuetype") or {}).get("name") or "?"
     description = _adf_to_text(f.get("description")).strip()
     if len(description) > 4000:
-        description = description[:3900] + "\n…[description cắt bớt]"
+        description = description[:3900] + "\n…[description truncated]"
     body = (
         f"*<{_browse_url(i['key'])}|{i['key']}>* — {f.get('summary','')}\n"
         f"{itype} · {status} · prio {priority} · @{assignee} (reporter @{reporter})"
@@ -178,8 +266,53 @@ async def get_issue(key: str) -> ToolResult:
     return ToolResult.success(body)
 
 
-async def search_jql(jql: str, max_results: int = 20, kind: str = "Kết quả") -> ToolResult:
-    """Escape hatch — raw JQL. Không expose trong prompt mặc định."""
+# KR team roster — stable role → person data (accountIds resolved live once).
+# Lives here as data, not in any prompt, so the brain reasons about *who* to cc
+# from the tool result + thread context rather than a hard-coded prompt rule.
+KR_TEAM_ROSTER: list[dict] = [
+    {"role": "Tech Lead / EM", "name": "John Dinh",           "account_id": "635786eb13f37118d72633d6"},
+    {"role": "PM",             "name": "Hyeyoung Hailey Sim",  "account_id": "712020:3afe9784-6470-4473-83a6-27a2c24fec46"},
+    {"role": "PM",             "name": "winter_jukyung.oh",    "account_id": "62207ae2a687c5006a5ed4ab"},
+    {"role": "BE senior",      "name": "Danny Nguyen",         "account_id": "62eb49a03cc20c06c8af2092"},
+    {"role": "QA",             "name": "Emily Pham",           "account_id": "627dfe5f9311100068a17ea2"},
+    {"role": "Reporter",       "name": "Tyron",                "account_id": "629819fa1c69c7006ac55162"},
+]
+
+
+async def list_team() -> ToolResult:
+    """The KR team roster (role → name → accountId) for @-mentioning by role.
+
+    Use to resolve who a role refers to ("cc PM / QA / tech lead") before
+    passing `mentions` to jira_create_issue. For anyone not listed, fall back
+    to search_users."""
+    lines = ["*KR team roster:*"]
+    lines += [f"• {m['role']}: {m['name']} · `{m['account_id']}`" for m in KR_TEAM_ROSTER]
+    return ToolResult.success("\n".join(lines))
+
+
+async def search_users(query: str, max_results: int = 10) -> ToolResult:
+    """Search Jira users by name or email → accountId (for @-mentions / assign).
+
+    Returns a compact list the brain can map name/role → accountId when a
+    person is not in the built-in roster."""
+    async with _client() as c:
+        r = await c.get(f"{_base()}/rest/api/3/user/search",
+                        params={"query": query, "maxResults": max(1, min(max_results, 50))})
+        r.raise_for_status()
+        users = r.json() or []
+    people = [u for u in users if u.get("accountType") == "atlassian"] or users
+    if not people:
+        return ToolResult.failure("NOT_FOUND", f"No Jira user matching `{query}`.")
+    lines = [f"*Jira users matching `{query}`* ({len(people)}):"]
+    for u in people:
+        name = u.get("displayName") or "?"
+        email = u.get("emailAddress") or "—"
+        lines.append(f"• {name} · {email} · `{u.get('accountId')}`")
+    return ToolResult.success("\n".join(lines))
+
+
+async def search_jql(jql: str, max_results: int = 20, kind: str = "Results") -> ToolResult:
+    """Escape hatch — raw JQL. Not exposed in the default prompt."""
     return await _search_jql(jql, kind, max_results)
 
 
@@ -190,7 +323,7 @@ async def get_active_sprint(board_id: int | None = None) -> dict:
     """
     bid = board_id or settings.jira_board_id
     if not bid:
-        raise RuntimeError("JIRA_BOARD_ID chưa cấu hình")
+        raise RuntimeError("JIRA_BOARD_ID not configured")
     async with _client() as c:
         r = await c.get(
             f"{_base()}/rest/agile/1.0/board/{bid}/sprint",
@@ -199,7 +332,7 @@ async def get_active_sprint(board_id: int | None = None) -> dict:
         r.raise_for_status()
         sprints = r.json().get("values", [])
     if not sprints:
-        raise RuntimeError(f"Không có active sprint trên board {bid}")
+        raise RuntimeError(f"No active sprint on board {bid}")
     s = sprints[0]
     name = s.get("name", "")
     # Extract trailing integer from sprint name (e.g. "DAPro-2.126" -> 126, "Sprint 126" -> 126)
@@ -212,8 +345,15 @@ async def get_active_sprint(board_id: int | None = None) -> dict:
 
 async def create_issue(summary: str, description: str = "",
                        project: str | None = None,
-                       issue_type: str = "Task") -> ToolResult:
+                       issue_type: str = "Task",
+                       mentions: list[dict] | None = None) -> ToolResult:
     project = _project(project)
+    doc = {"type": "doc", "version": 1,
+           "content": _adf_blocks(description) if description else []}
+    if mentions:
+        cc = _mention_paragraph(mentions)
+        if cc:
+            doc["content"].append(cc)
     payload = {
         "fields": {
             "project": {"key": project},
@@ -221,13 +361,13 @@ async def create_issue(summary: str, description: str = "",
             "issuetype": {"name": issue_type},
         }
     }
-    if description:
-        payload["fields"]["description"] = _adf(description)
+    if doc["content"]:
+        payload["fields"]["description"] = doc
     async with _client() as c:
         r = await c.post(f"{_base()}/rest/api/3/issue", json=payload)
         r.raise_for_status()
         d = r.json()
-    return ToolResult.success(f"✅ Tạo <{_browse_url(d['key'])}|{d['key']}>: {summary}")
+    return ToolResult.success(f"✅ Created <{_browse_url(d['key'])}|{d['key']}>: {summary}")
 
 
 async def list_transitions(key: str) -> ToolResult:
@@ -236,8 +376,8 @@ async def list_transitions(key: str) -> ToolResult:
         r.raise_for_status()
         ts = r.json().get("transitions", [])
     if not ts:
-        return ToolResult.success(f"_Không có transition khả dụng cho {key}._")
-    lines = [f"*Transitions cho <{_browse_url(key)}|{key}>*:"]
+        return ToolResult.success(f"_No transitions available for {key}._")
+    lines = [f"*Transitions for <{_browse_url(key)}|{key}>*:"]
     for t in ts:
         lines.append(f"• `{t['name']}` → {t['to']['name']}")
     return ToolResult.success("\n".join(lines))
@@ -254,7 +394,7 @@ async def transition_issue(key: str, target_status: str) -> ToolResult:
             names = ", ".join(t["name"] for t in ts)
             return ToolResult.failure(
                 "VALIDATION",
-                f"Không có transition `{target_status}` cho {key}. Có: {names}",
+                f"No transition `{target_status}` for {key}. Available: {names}",
             )
         r = await c.post(
             f"{_base()}/rest/api/3/issue/{key}/transitions",
@@ -267,7 +407,7 @@ async def transition_issue(key: str, target_status: str) -> ToolResult:
 async def assign_issue(key: str, assignee: str | None = None) -> ToolResult:
     """Assign a Jira issue (Jira Cloud assigns by accountId).
 
-    - assignee empty / "me" / "tôi" / "self" → current API-token user (``/myself``).
+    - assignee empty / "me" / "self" (or Vietnamese equivalents) → current API-token user (``/myself``).
     - otherwise → resolve by email or display name via user search (first match).
     """
     want = (assignee or "").strip().lower()
@@ -282,11 +422,11 @@ async def assign_issue(key: str, assignee: str | None = None) -> ToolResult:
             users = r.json() or []
             if not users:
                 return ToolResult.failure(
-                    "NOT_FOUND", f"Không tìm thấy Jira user khớp `{assignee}`."
+                    "NOT_FOUND", f"No Jira user matching `{assignee}`."
                 )
             u = users[0]
         account_id = u.get("accountId")
-        who = u.get("displayName") or assignee or "bạn"
+        who = u.get("displayName") or assignee or "you"
         r = await c.put(
             f"{_base()}/rest/api/3/issue/{key}/assignee",
             json={"accountId": account_id},
@@ -297,9 +437,9 @@ async def assign_issue(key: str, assignee: str | None = None) -> ToolResult:
             except Exception:
                 detail = r.text
             return ToolResult.failure(
-                "VALIDATION", f"Jira từ chối assign {key}: {str(detail)[:200]}"
+                "VALIDATION", f"Jira rejected assign {key}: {str(detail)[:200]}"
             )
-    return ToolResult.success(f"✅ Đã assign <{_browse_url(key)}|{key}> cho *{who}*")
+    return ToolResult.success(f"✅ Assigned <{_browse_url(key)}|{key}> to *{who}*")
 
 
 async def comment_issue(key: str, body: str) -> ToolResult:
@@ -309,7 +449,7 @@ async def comment_issue(key: str, body: str) -> ToolResult:
             json={"body": _adf(body)},
         )
         r.raise_for_status()
-    return ToolResult.success(f"✅ Đã comment <{_browse_url(key)}|{key}>")
+    return ToolResult.success(f"✅ Commented on <{_browse_url(key)}|{key}>")
 
 
 async def get_comments(key: str, limit: int = 5) -> ToolResult:
@@ -328,20 +468,20 @@ async def get_comments(key: str, limit: int = 5) -> ToolResult:
         data = r.json()
     comments = data.get("comments") or []
     if not comments:
-        return ToolResult.success(f"*<{_browse_url(key)}|{key}>* — chưa có comment nào.")
+        return ToolResult.success(f"*<{_browse_url(key)}|{key}>* — no comments yet.")
     total = data.get("total", len(comments))
     # orderBy=-created returns newest-first; reverse so the brain reads in order.
     shown = list(reversed(comments))
-    header = f"*<{_browse_url(key)}|{key}>* — {len(shown)} comment gần nhất"
+    header = f"*<{_browse_url(key)}|{key}>* — {len(shown)} most recent comments"
     if total > len(shown):
-        header += f" (tổng {total})"
+        header += f" (total {total})"
     lines = [header + ":"]
     for cm in shown:
         author = (cm.get("author") or {}).get("displayName") or "?"
         when = (cm.get("created") or "")[:10]
         text = _adf_to_text(cm.get("body")).strip()
         if len(text) > 1500:
-            text = text[:1450] + "\n…[comment cắt bớt]"
+            text = text[:1450] + "\n…[comment truncated]"
         lines.append(f"\n• *{author}* ({when}):\n{text}")
     return ToolResult.success("\n".join(lines))
 
@@ -356,9 +496,12 @@ ACTION_HANDLERS = {
     "jira.get_issue":                 lambda p: get_issue(p["key"]),
     "jira.get_comments":              lambda p: get_comments(p["key"], p.get("limit", 5)),
     "jira.search":                    lambda p: search_jql(p["jql"], p.get("max_results", 20),
-                                                           p.get("kind", "Kết quả")),
+                                                           p.get("kind", "Results")),
+    "jira.list_team":                 lambda p: list_team(),
+    "jira.search_users":              lambda p: search_users(p["query"], p.get("max_results", 10)),
     "jira.create_issue":              lambda p: create_issue(p["summary"], p.get("description", ""),
-                                                             p.get("project"), p.get("issue_type", "Task")),
+                                                             p.get("project"), p.get("issue_type", "Task"),
+                                                             p.get("mentions")),
     "jira.comment_issue":             lambda p: comment_issue(p["key"], p["body"]),
     "jira.assign_issue":              lambda p: assign_issue(p["key"], p.get("assignee")),
     "jira.list_transitions":          lambda p: list_transitions(p["key"]),

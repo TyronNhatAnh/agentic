@@ -12,7 +12,7 @@ from .worker import Job, JobRunner
 log = logging.getLogger(__name__)
 
 _MENTION_RE = re.compile(r"<@([A-Z0-9]+)>\s*")
-_BUSY_MSG = "⏳ Đang chạy job trước rồi, đợi xíu nha."
+_BUSY_MSG = "⏳ Still running a previous job, hang on."
 # Block Kit markdown blocks allow 12,000 chars cumulatively per payload; one
 # block per message, kept just under the cap to leave room for any suffix.
 _SLACK_CHUNK_LEN = 11800
@@ -110,10 +110,10 @@ def _placeholder_for(text: str) -> str:
     if any(w in lowered for w in ("fix", "sửa", "sua", "patch")) and (
         "pr" in lowered or "pull/" in lowered
     ):
-        return "⏳ Đang chuẩn bị PR worktree để fix..."
+        return "⏳ Preparing the PR worktree to fix..."
     if "review" in lowered and ("pr" in lowered or "pull/" in lowered):
-        return "⏳ Đang fetch diff và review code..."
-    return "⏳ Đang xử lý..."
+        return "⏳ Fetching the diff and reviewing the code..."
+    return "⏳ Processing..."
 
 
 def _markdown_block(text: str) -> list[dict]:
@@ -131,7 +131,7 @@ def _notify_text(text: str) -> str:
     comes from the markdown block."""
     stripped = text.strip()
     if not stripped:
-        return "tin nhắn"
+        return "message"
     return stripped.splitlines()[0][:150]
 
 
@@ -267,7 +267,7 @@ def register(
             await client.chat_postMessage(
                 channel=channel,
                 thread_ts=thread_ts,
-                text="Bạn cần gì? Mention mình kèm nội dung nha.",
+                text="What do you need? Mention me with your request.",
             )
             return
 
@@ -341,11 +341,11 @@ def register(
         ts = message.get("ts")
         if not (channel and ts):
             return
-        label = "✅ Đã cho phép" if allow else "❌ Đã huỷ"
+        label = "✅ Allowed" if allow else "❌ Cancelled"
         if not verdict:
             # Future already resolved or expired — still update text so the UI
             # doesn't look stuck.
-            label = f"{label} (request đã hết hạn)"
+            label = f"{label} (request expired)"
         try:
             await client.chat_update(channel=channel, ts=ts, text=label, blocks=[])
         except Exception:

@@ -55,10 +55,10 @@ def _redact(text: str) -> str:
 # token-based path; an explicit https:// URL *is* the token path and passes.
 _RAW_NET_GIT_RE = re.compile(r"\bgit\b[^|;&]*\b(fetch|pull)\b")
 _RAW_NET_GIT_REASON = (
-    "Raw `git fetch`/`git pull` dùng remote SSH — môi trường bot không có SSH "
-    "key nên fail hoặc để lại ref cũ. Dùng `mcp__agentic__git_latest_release` "
-    "cho câu hỏi release branch/commit mới nhất, hoặc các tool `git_*`; nếu "
-    "bắt buộc fetch thủ công thì fetch qua URL `https://` với GITHUB_TOKEN."
+    "Raw `git fetch`/`git pull` uses the SSH remote — the bot environment has no "
+    "SSH key, so it fails or leaves stale refs. Use `mcp__agentic__git_latest_release` "
+    "for latest release branch/commit questions, or the `git_*` tools; if you must "
+    "fetch manually, fetch over an `https://` URL with GITHUB_TOKEN."
 )
 
 

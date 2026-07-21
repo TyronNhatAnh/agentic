@@ -62,7 +62,7 @@ def build_subagents() -> dict[str, AgentDefinition]:
     return {
         "po": AgentDefinition(
             description=(
-                "Product Owner — viết PRD, scope, milestones, definition of done."
+                "Product Owner — writes PRD, scope, milestones, definition of done."
             ),
             prompt=load_prompt("po"),
             tools=[],
@@ -70,7 +70,7 @@ def build_subagents() -> dict[str, AgentDefinition]:
         ),
         "ba": AgentDefinition(
             description=(
-                "Business Analyst — viết user story + acceptance criteria "
+                "Business Analyst — writes user stories + acceptance criteria "
                 "(Given/When/Then)."
             ),
             prompt=load_prompt("ba"),
@@ -79,8 +79,8 @@ def build_subagents() -> dict[str, AgentDefinition]:
         ),
         "review": AgentDefinition(
             description=(
-                "Code Reviewer — review PR diff theo template Markdown. Có "
-                "thể fetch diff từ GitHub và cross-check file trong worktree."
+                "Code Reviewer — reviews PR diffs using a Markdown template. Can "
+                "fetch the diff from GitHub and cross-check files in the worktree."
             ),
             prompt=load_prompt("review"),
             tools=REVIEW_ALLOWED_TOOLS,
@@ -89,9 +89,9 @@ def build_subagents() -> dict[str, AgentDefinition]:
         ),
         "dev": AgentDefinition(
             description=(
-                "Developer — đọc + sửa/viết code trong worktree (edit-only: KHÔNG "
-                "có shell/git/gh). Trả về danh sách file đã đổi + commit message "
-                "gợi ý; người gọi (brain) tự commit/push/mở PR."
+                "Developer — reads + edits/writes code in the worktree (edit-only: NO "
+                "shell/git/gh). Returns the list of changed files + a suggested commit "
+                "message; the caller (brain) commits/pushes/opens the PR."
             ),
             prompt=load_prompt("dev"),
             tools=DEV_ALLOWED_TOOLS,

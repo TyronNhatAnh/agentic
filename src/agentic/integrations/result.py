@@ -35,22 +35,22 @@ class ToolResult:
 def classify_exception(exc: BaseException, *, service: str) -> ToolResult:
     """Map raw exceptions to a deterministic ToolResult. Never include raw stacktrace text."""
     if isinstance(exc, httpx.TimeoutException):
-        return ToolResult.failure("TIMEOUT", f"{service} timeout, thử lại sau.", retryable=True)
+        return ToolResult.failure("TIMEOUT", f"{service} timeout, try again later.", retryable=True)
     if isinstance(exc, httpx.NetworkError):
-        return ToolResult.failure("NETWORK", f"Không kết nối được {service}.", retryable=True)
+        return ToolResult.failure("NETWORK", f"Could not connect to {service}.", retryable=True)
     if isinstance(exc, httpx.HTTPStatusError):
         s = exc.response.status_code
         if s in (401, 403):
-            return ToolResult.failure("AUTH", f"{service} từ chối auth (token sai hoặc hết quyền).")
+            return ToolResult.failure("AUTH", f"{service} rejected auth (bad token or insufficient permissions).")
         if s == 404:
-            return ToolResult.failure("NOT_FOUND", f"{service}: không tìm thấy resource.")
+            return ToolResult.failure("NOT_FOUND", f"{service}: resource not found.")
         if s == 429:
-            return ToolResult.failure("RATE_LIMIT", f"{service} rate-limit, đợi rồi thử lại.", retryable=True)
+            return ToolResult.failure("RATE_LIMIT", f"{service} rate-limited, wait and retry.", retryable=True)
         if 500 <= s < 600:
-            return ToolResult.failure("SERVER", f"{service} lỗi server ({s}).", retryable=True)
+            return ToolResult.failure("SERVER", f"{service} server error ({s}).", retryable=True)
         return ToolResult.failure("HTTP", f"{service} HTTP {s}.")
     if isinstance(exc, (KeyError, ValueError)):
-        return ToolResult.failure("VALIDATION", f"Thiếu hoặc sai field: {exc}.")
+        return ToolResult.failure("VALIDATION", f"Missing or invalid field: {exc}.")
     if isinstance(exc, RuntimeError):
         return ToolResult.failure("CONFIG", str(exc))
-    return ToolResult.failure("UNKNOWN", f"{service} lỗi bất ngờ.")
+    return ToolResult.failure("UNKNOWN", f"{service} unexpected error.")

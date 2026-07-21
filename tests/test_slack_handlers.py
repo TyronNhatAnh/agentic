@@ -19,7 +19,7 @@ def test_markdown_block_passes_text_through_unchanged():
 
 def test_notify_text_is_first_line_clipped():
     assert _notify_text("first line\nsecond line") == "first line"
-    assert _notify_text("  \n  ") == "tin nhắn"
+    assert _notify_text("  \n  ") == "message"
     assert _notify_text("x" * 200) == "x" * 150
 
 
@@ -32,4 +32,4 @@ def test_chunks_prefers_paragraph_boundaries():
 def test_fix_pr_gets_specific_placeholder():
     text = "fix 3 critical trong PR https://github.com/org/repo/pull/1"
 
-    assert _placeholder_for(text) == "⏳ Đang chuẩn bị PR worktree để fix..."
+    assert _placeholder_for(text) == "⏳ Preparing the PR worktree to fix..."

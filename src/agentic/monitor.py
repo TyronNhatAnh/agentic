@@ -138,7 +138,7 @@ def _summarize_errors(lines: list[str], max_groups: int = 3) -> list[str]:
             sample = _clean_line(ln)
             if not sample:  # e.g. a FATAL/PANIC line whose detail is on following lines
                 m = re.search(r"(FATAL|PANIC)", ln)
-                sample = f"{m.group(1)} (stacktrace ở dòng kế — dig bằng request id)" if m else ln[:80]
+                sample = f"{m.group(1)} (stacktrace on the next line — dig by request id)" if m else ln[:80]
             groups[sig] = [0, sample]
         groups[sig][0] += 1
     top = sorted(groups.values(), key=lambda g: g[0], reverse=True)[:max_groups]
@@ -190,7 +190,7 @@ def _format(
     failed_q = [s["name"] for s in svc_results if s["count"] is None]
     notable = bool(over or down)
 
-    lines = [f"*🩺 Health check `{env}`* · {_now_stamp()} · cửa sổ {window}"]
+    lines = [f"*🩺 Health check `{env}`* · {_now_stamp()} · window {window}"]
 
     if down:
         lines.append("\n*Endpoint DOWN:*")
@@ -199,9 +199,9 @@ def _format(
             lines.append(f"🔴 `{h['name']}` — {detail} ({h['url']})")
     if over:
         samples = samples or {}
-        lines.append(f"\n*Service vượt ngưỡng (≥ {threshold} log lỗi/{window}):*")
+        lines.append(f"\n*Services over threshold (≥ {threshold} error logs/{window}):*")
         for s in over:
-            lines.append(f"🔴 `{s['name']}` — {s['count']} log lỗi")
+            lines.append(f"🔴 `{s['name']}` — {s['count']} error logs")
             for hint in samples.get(s["name"], []):
                 lines.append(f"      • `{hint}`")
 
@@ -209,7 +209,7 @@ def _format(
         rest = [s for s in counted if 0 < s["count"] < threshold][:5]
         if rest:
             lines.append(
-                "\n_Khác (dưới ngưỡng):_ "
+                "\n_Others (below threshold):_ "
                 + ", ".join(f"`{s['name']}` {s['count']}" for s in rest)
             )
         ok_health = [h for h in health_results if h["ok"]]
@@ -217,13 +217,13 @@ def _format(
             lines.append(f"_Endpoint OK: {len(ok_health)}/{len(health_results)}._")
     else:
         total = sum(s["count"] for s in counted)
-        lines.append(f"✅ {len(svc_results)} service ổn (Σ {total} log lỗi, đều < {threshold}).")
+        lines.append(f"✅ {len(svc_results)} services healthy (Σ {total} error logs, all < {threshold}).")
         if health_results:
             ok = sum(1 for h in health_results if h["ok"])
             lines.append(f"Health: {ok}/{len(health_results)} endpoint OK.")
 
     if failed_q:
-        lines.append(f"\n_⚠️ Không query được Loki cho: {', '.join(failed_q)}._")
+        lines.append(f"\n_⚠️ Couldn't query Loki for: {', '.join(failed_q)}._")
 
     return "\n".join(lines), notable
 

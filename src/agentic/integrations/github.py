@@ -41,7 +41,7 @@ async def create_issue(title: str, body: str, repo: str | None = None) -> str:
         )
         r.raise_for_status()
         d = r.json()
-        return f"✅ Tạo issue #{d['number']} trong `{repo}`: <{d['html_url']}|{d['title']}>"
+        return f"✅ Created issue #{d['number']} in `{repo}`: <{d['html_url']}|{d['title']}>"
 
 
 async def comment_pr(pr: int, body: str, repo: str | None = None) -> str:
@@ -53,7 +53,7 @@ async def comment_pr(pr: int, body: str, repo: str | None = None) -> str:
             json={"body": body},
         )
         r.raise_for_status()
-        return f"✅ Đã comment vào PR #{pr} `{repo}`: <{r.json()['html_url']}|xem comment>"
+        return f"✅ Commented on PR #{pr} `{repo}`: <{r.json()['html_url']}|view comment>"
 
 
 async def add_assignees(
@@ -65,7 +65,7 @@ async def add_assignees(
     repo = _repo(repo)
     wanted = [a.lstrip("@").strip() for a in (assignees or []) if a and a.strip()]
     if not wanted:
-        return ToolResult.failure("VALIDATION", "Cần ít nhất 1 assignee.")
+        return ToolResult.failure("VALIDATION", "Need at least 1 assignee.")
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             f"{API}/repos/{repo}/issues/{pr}/assignees",
@@ -74,7 +74,7 @@ async def add_assignees(
         )
         if r.status_code == 404:
             return ToolResult.failure(
-                "NOT_FOUND", f"Không thấy PR/issue #{pr} trong `{repo}`."
+                "NOT_FOUND", f"PR/issue #{pr} not found in `{repo}`."
             )
         r.raise_for_status()
         got = {a.get("login", "").lower() for a in (r.json().get("assignees") or [])}
@@ -83,14 +83,14 @@ async def add_assignees(
     if not added:
         return ToolResult.failure(
             "VALIDATION",
-            f"Không assign được {', '.join('@'+w for w in wanted)} cho PR #{pr} "
-            f"`{repo}` — user phải là collaborator/có push trên repo. Assign tay trên UI.",
+            f"Could not assign {', '.join('@'+w for w in wanted)} to PR #{pr} "
+            f"`{repo}` — user must be a collaborator/have push access on the repo. Assign manually in the UI.",
         )
-    msg = f"✅ Đã assign {', '.join('@'+a for a in added)} cho PR #{pr} `{repo}`."
+    msg = f"✅ Assigned {', '.join('@'+a for a in added)} to PR #{pr} `{repo}`."
     if missed:
         msg += (
-            f" ⚠️ Bỏ qua {', '.join('@'+m for m in missed)} "
-            "(không có quyền trên repo — cần add collaborator trước)."
+            f" ⚠️ Skipped {', '.join('@'+m for m in missed)} "
+            "(no access on the repo — add them as a collaborator first)."
         )
     return ToolResult.success(msg)
 
@@ -100,7 +100,7 @@ async def approve_pr(
 ) -> ToolResult:
     repo = _repo(repo)
     if not confirmed:
-        question = f"Ông xác nhận **approve review** PR #{pr} `{repo}`?"
+        question = f"Confirm **approve review** for PR #{pr} `{repo}`?"
         if body:
             question += f"\n> {body}"
         res = ToolResult.failure("NEEDS_CONFIRMATION", question)
@@ -120,14 +120,14 @@ async def approve_pr(
         )
         if r.status_code == 422:
             # Most common: author trying to approve own PR, or PR is closed.
-            detail = (r.json() or {}).get("message") or "không approve được"
+            detail = (r.json() or {}).get("message") or "could not approve"
             return ToolResult.failure(
-                "VALIDATION", f"GitHub từ chối approve PR #{pr} `{repo}`: {detail}"
+                "VALIDATION", f"GitHub refused to approve PR #{pr} `{repo}`: {detail}"
             )
         r.raise_for_status()
         d = r.json()
     return ToolResult.success(
-        f"✅ Đã approve review PR #{pr} `{repo}`: <{d.get('html_url') or ''}|xem review>"
+        f"✅ Approved review for PR #{pr} `{repo}`: <{d.get('html_url') or ''}|view review>"
     )
 
 
@@ -141,9 +141,9 @@ async def create_pr(
 ) -> ToolResult:
     repo = _repo(repo)
     if not title.strip():
-        return ToolResult.failure("VALIDATION", "PR title không được rỗng.")
+        return ToolResult.failure("VALIDATION", "PR title must not be empty.")
     if not head.strip() or not base.strip():
-        return ToolResult.failure("VALIDATION", "head/base branch không được rỗng.")
+        return ToolResult.failure("VALIDATION", "head/base branch must not be empty.")
 
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
@@ -172,16 +172,16 @@ async def create_pr(
                 if existing:
                     p = existing[0]
                     return ToolResult.success(
-                        f"ℹ️ PR đã tồn tại: <{p['html_url']}|#{p['number']} {p['title']}>"
+                        f"ℹ️ PR already exists: <{p['html_url']}|#{p['number']} {p['title']}>"
                     )
-            detail = msg or errors_text or "tạo PR bị từ chối"
+            detail = msg or errors_text or "PR creation refused"
             return ToolResult.failure(
-                "VALIDATION", f"GitHub từ chối tạo PR `{repo}`: {detail}"
+                "VALIDATION", f"GitHub refused to create PR `{repo}`: {detail}"
             )
         r.raise_for_status()
         d = r.json()
     return ToolResult.success(
-        f"✅ Tạo PR #{d['number']} `{repo}`: <{d['html_url']}|{d['title']}>"
+        f"✅ Created PR #{d['number']} `{repo}`: <{d['html_url']}|{d['title']}>"
     )
 
 
@@ -204,7 +204,7 @@ async def update_pr(
     if draft is not None:
         patch["draft"] = draft
     if not patch:
-        return ToolResult.failure("VALIDATION", "Không có trường nào để cập nhật.")
+        return ToolResult.failure("VALIDATION", "No fields to update.")
 
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.patch(
@@ -214,8 +214,8 @@ async def update_pr(
         )
         if r.status_code == 422:
             data = r.json() or {}
-            msg = data.get("message") or "cập nhật PR bị từ chối"
-            return ToolResult.failure("VALIDATION", f"GitHub từ chối: {msg}")
+            msg = data.get("message") or "PR update refused"
+            return ToolResult.failure("VALIDATION", f"GitHub refused: {msg}")
         r.raise_for_status()
         d = r.json()
     parts = []
@@ -225,9 +225,9 @@ async def update_pr(
         parts.append(f"title → `{d['title']}`")
     if draft is not None:
         parts.append(f"draft → `{d['draft']}`")
-    summary = ", ".join(parts) or "cập nhật thành công"
+    summary = ", ".join(parts) or "updated successfully"
     return ToolResult.success(
-        f"✅ PR #{pr} `{repo}` đã cập nhật: {summary}. <{d['html_url']}|Xem PR>"
+        f"✅ PR #{pr} `{repo}` updated: {summary}. <{d['html_url']}|View PR>"
     )
 
 
@@ -246,7 +246,7 @@ async def merge_pr(
     repo = _repo(repo)
     if method not in _MERGE_METHODS:
         return ToolResult.failure(
-            "VALIDATION", f"merge method `{method}` không hợp lệ (squash/merge/rebase)"
+            "VALIDATION", f"merge method `{method}` is invalid (squash/merge/rebase)"
         )
 
     # Always re-check mergeability — even on resume, state may have changed.
@@ -257,37 +257,37 @@ async def merge_pr(
 
     if p.get("merged"):
         return ToolResult.failure(
-            "VALIDATION", f"PR #{pr} `{repo}` đã merge rồi (sha {p.get('merge_commit_sha')})."
+            "VALIDATION", f"PR #{pr} `{repo}` is already merged (sha {p.get('merge_commit_sha')})."
         )
     if p.get("state") != "open":
         return ToolResult.failure(
-            "VALIDATION", f"PR #{pr} `{repo}` đang ở state `{p.get('state')}`, không merge được."
+            "VALIDATION", f"PR #{pr} `{repo}` is in state `{p.get('state')}`, cannot merge."
         )
     if p.get("draft"):
         return ToolResult.failure(
-            "VALIDATION", f"PR #{pr} `{repo}` đang là draft."
+            "VALIDATION", f"PR #{pr} `{repo}` is a draft."
         )
 
     state = p.get("mergeable_state") or "unknown"
     if state not in _MERGE_OK_STATES:
         reasons = {
-            "dirty": "có conflict với base branch",
-            "blocked": "bị block (thiếu required approvals hoặc required checks fail)",
-            "behind": "branch đang behind base, cần update branch",
-            "draft": "PR đang draft",
-            "unknown": "GitHub chưa tính xong mergeable state, thử lại sau xíu",
-            "has_hooks": "có hook chặn (cần admin merge)",
+            "dirty": "has a conflict with the base branch",
+            "blocked": "is blocked (missing required approvals or required checks failing)",
+            "behind": "branch is behind base, needs a branch update",
+            "draft": "PR is a draft",
+            "unknown": "GitHub hasn't finished computing mergeable state, retry in a bit",
+            "has_hooks": "a hook is blocking (needs admin merge)",
         }
         why = reasons.get(state, f"mergeable_state = `{state}`")
         return ToolResult.failure(
-            "VALIDATION", f"⛔ PR #{pr} `{repo}` chưa merge được: {why}."
+            "VALIDATION", f"⛔ PR #{pr} `{repo}` cannot be merged yet: {why}."
         )
 
     if not confirmed:
         head = p.get("head", {}).get("ref", "?")
         base = p.get("base", {}).get("ref", "?")
         question = (
-            f"Ông xác nhận **merge** PR #{pr} `{repo}` "
+            f"Confirm **merge** for PR #{pr} `{repo}` "
             f"(`{head}` → `{base}`, method `{method}`)?"
         )
         res = ToolResult.failure("NEEDS_CONFIRMATION", question)
@@ -316,14 +316,14 @@ async def merge_pr(
             json=merge_body,
         )
         if r.status_code in (405, 409):
-            detail = (r.json() or {}).get("message") or "merge bị từ chối"
+            detail = (r.json() or {}).get("message") or "merge refused"
             return ToolResult.failure(
-                "VALIDATION", f"GitHub từ chối merge PR #{pr} `{repo}`: {detail}"
+                "VALIDATION", f"GitHub refused to merge PR #{pr} `{repo}`: {detail}"
             )
         r.raise_for_status()
         d = r.json()
     return ToolResult.success(
-        f"✅ Đã merge PR #{pr} `{repo}` ({method}). SHA `{d.get('sha', '?')[:7]}`."
+        f"✅ Merged PR #{pr} `{repo}` ({method}). SHA `{d.get('sha', '?')[:7]}`."
     )
 
 
@@ -345,8 +345,8 @@ async def list_prs(repo: str, state: str = "open", author: str | None = None) ->
     if author:
         items = [p for p in items if p["user"]["login"] == author]
     if not items:
-        return f"_Không có PR `{state}` nào trong `{repo}`._"
-    lines = [f"*PR `{state}` trong `{repo}`* ({len(items)}):"]
+        return f"_No `{state}` PRs in `{repo}`._"
+    lines = [f"*`{state}` PRs in `{repo}`* ({len(items)}):"]
     for p in items[:20]:
         lines.append(
             f"• #{p['number']} <{p['html_url']}|{p['title']}> "
@@ -369,8 +369,8 @@ async def list_issues(repo: str, state: str = "open", assignee: str | None = Non
         # /issues includes PRs — filter them out
         items = [i for i in r.json() if "pull_request" not in i]
     if not items:
-        return f"_Không có issue `{state}` nào trong `{repo}`._"
-    lines = [f"*Issue `{state}` trong `{repo}`* ({len(items)}):"]
+        return f"_No `{state}` issues in `{repo}`._"
+    lines = [f"*`{state}` issues in `{repo}`* ({len(items)}):"]
     for i in items[:20]:
         labels = ", ".join(l["name"] for l in i.get("labels", []))
         suffix = f" · 🏷 {labels}" if labels else ""
@@ -388,7 +388,7 @@ async def list_notifications(all: bool = False) -> str:
         r.raise_for_status()
         items = r.json()
     if not items:
-        return "_Inbox GitHub sạch sẽ 🎉_"
+        return "_GitHub inbox is clean 🎉_"
     lines = [f"*Notifications* ({len(items)} {'all' if all else 'unread'}):"]
     for n in items[:20]:
         repo = n["repository"]["full_name"]
@@ -414,8 +414,8 @@ async def search(query: str, kind: str = "search") -> str:
     items = data.get("items", [])
     total = data.get("total_count", 0)
     if not items:
-        return f"_Không có kết quả cho `{query}`._"
-    lines = [f"*{kind}* — `{query}` ({total} tổng, hiển thị {min(len(items), 20)}):"]
+        return f"_No results for `{query}`._"
+    lines = [f"*{kind}* — `{query}` ({total} total, showing {min(len(items), 20)}):"]
     for i in items[:20]:
         is_pr = "pull_request" in i
         kind_icon = "🔀" if is_pr else "🐛"

@@ -101,7 +101,7 @@ def _truncate(text: str, limit: int, *, label: str = "input") -> tuple[str, bool
     tail = 100
     truncated = (
         text[:head]
-        + f"\n…[{label} cắt bớt {len(text) - head - tail} ký tự]…\n"
+        + f"\n…[{label} truncated {len(text) - head - tail} chars]…\n"
         + text[-tail:]
     )
     return truncated, True
@@ -197,13 +197,13 @@ async def _resolve_active_workspace(
 def _workspace_brain_hint(ws: dict) -> str:
     """Tell the brain a worktree is ready so it routes fix/PR work to dev."""
     return (
-        "## Workspace đang mở\n"
-        f"Thread này đã có worktree sẵn cho ticket `{ws['ticket']}` "
+        "## Open workspace\n"
+        f"This thread already has a worktree ready for ticket `{ws['ticket']}` "
         f"(service `{ws['service']}`, branch `{ws['feature_branch']}`).\n"
-        f"- Worktree path (cwd để đọc/sửa/commit): `{ws['worktree']}`\n"
-        "Nếu user muốn fix/sửa/commit/push/tạo PR cho ticket này → giao cho `dev`. "
-        "Nhớ chuyển nguyên worktree path trên cho dev để nó edit đúng chỗ "
-        "(dev tự edit, commit, push, mở PR rồi báo link)."
+        f"- Worktree path (cwd for read/edit/commit): `{ws['worktree']}`\n"
+        "If the user wants to fix/edit/commit/push/open a PR for this ticket → hand it to `dev`. "
+        "Pass the worktree path above verbatim to dev so it edits the right place "
+        "(dev edits, commits, pushes, opens the PR, then reports the link)."
     )
 
 
@@ -287,7 +287,7 @@ async def handle_message(
     reply_text = brain_result.reply or "(no output)"
     if input_truncated:
         reply_text += (
-            f"\n\n⚠️ input quá dài, đã cắt còn {settings.max_input_chars} ký tự"
+            f"\n\n⚠️ input too long, truncated to {settings.max_input_chars} chars"
         )
     if brain_result.error:
         reply_text = f"{reply_text}\n\n⚠️ {brain_result.error}".strip()

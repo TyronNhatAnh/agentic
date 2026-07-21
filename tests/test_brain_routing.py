@@ -51,8 +51,8 @@ def test_tool_progress_renders_only_after_first_tool():
     from agentic.sdk.brain_session import _tool_progress
 
     assert _tool_progress("", 0) == ""
-    assert _tool_progress("grafana_query_loki", 1) == "🔧 đang chạy `grafana_query_loki`"
-    assert _tool_progress("Bash", 3) == "🔧 đang chạy `Bash` · 3 bước"
+    assert _tool_progress("grafana_query_loki", 1) == "🔧 running `grafana_query_loki`"
+    assert _tool_progress("Bash", 3) == "🔧 running `Bash` · 3 steps"
 
 
 def test_session_cwd_is_stable_and_never_the_worktree(tmp_path, monkeypatch):

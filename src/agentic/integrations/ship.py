@@ -43,24 +43,24 @@ async def create_pr(
     draft: bool = False,
 ) -> ToolResult:
     if not pr_title.strip():
-        return ToolResult.failure("VALIDATION", "pr_title không được rỗng.")
+        return ToolResult.failure("VALIDATION", "pr_title must not be empty.")
 
     svc = resolve_service(service)
     if not svc:
         return ToolResult.failure(
-            "NOT_FOUND", f"Không tìm thấy service `{service}` trong mapping."
+            "NOT_FOUND", f"Service `{service}` not found in mapping."
         )
     worktree_path = await git_int.resolve_existing_worktree(svc, ticket)
     if not worktree_path:
         return ToolResult.failure(
             "NOT_FOUND",
-            f"Chưa có worktree cho `feature/{ticket}`. Chạy `git.prepare_workspace` trước.",
+            f"No worktree for `feature/{ticket}` yet. Run `git.prepare_workspace` first.",
         )
     github_repo = (svc.get("github_repo") or "").strip()
     if not github_repo or "/" not in github_repo:
         return ToolResult.failure(
             "CONFIG",
-            f"Service `{svc['name']}` chưa cấu hình `github_repo` dạng `owner/name`.",
+            f"Service `{svc['name']}` has no `github_repo` configured as `owner/name`.",
         )
 
     feature_branch = f"feature/{ticket}"
@@ -76,7 +76,7 @@ async def create_pr(
         "status", "--porcelain", cwd=str(worktree_path)
     )
     if rc != 0:
-        return ToolResult.failure("GIT_STATUS", f"git status lỗi: {err[:200]}")
+        return ToolResult.failure("GIT_STATUS", f"git status failed: {err[:200]}")
     has_changes = bool(status_out.strip())
 
     final_body = _append_jira_key(pr_body, ticket, pr_title)
@@ -88,20 +88,20 @@ async def create_pr(
     if has_changes and commit_message.strip():
         rc, _, err = await git_int._run_git("add", "-A", cwd=str(worktree_path))
         if rc != 0:
-            lines.append(f"1. ❌ git add lỗi: {err[:200]}")
+            lines.append(f"1. ❌ git add failed: {err[:200]}")
             return ToolResult.failure("GIT_ADD", "\n".join(lines))
         rc, _, err = await git_int._run_git(
             "commit", "-m", commit_message, cwd=str(worktree_path)
         )
         if rc != 0:
-            lines.append(f"1. ❌ git commit lỗi: {err[:300]}")
+            lines.append(f"1. ❌ git commit failed: {err[:300]}")
             return ToolResult.failure("GIT_COMMIT", "\n".join(lines))
         rc, sha, _ = await git_int._run_git(
             "rev-parse", "HEAD", cwd=str(worktree_path)
         )
         lines.append(f"1. ✅ Commit `{(sha or '?')[:7]}`")
     else:
-        lines.append("1. ⏭️ Skip commit (worktree sạch)")
+        lines.append("1. ⏭️ Skip commit (worktree clean)")
 
     # 2. Push (always run — branch might have local commits not pushed yet).
     push_url, authed_env = await git_int._authed_remote_url(str(worktree_path))
@@ -109,7 +109,7 @@ async def create_pr(
         "push", "-u", push_url, feature_branch, cwd=str(worktree_path), env=authed_env
     )
     if rc != 0:
-        lines.append(f"2. ❌ git push lỗi: {err[:300]}")
+        lines.append(f"2. ❌ git push failed: {err[:300]}")
         return ToolResult.failure("GIT_PUSH", "\n".join(lines))
     lines.append(f"2. ✅ Pushed `{feature_branch}` → origin")
 
@@ -146,14 +146,14 @@ async def create_pr(
                     if existing:
                         p = existing[0]
                         lines.append(
-                            f"3. ℹ️ PR đã tồn tại: <{p['html_url']}|#{p['number']}>"
+                            f"3. ℹ️ PR already exists: <{p['html_url']}|#{p['number']}>"
                         )
                     else:
-                        lines.append(f"3. ❌ Tạo PR fail: {msg or errors_text}")
+                        lines.append(f"3. ❌ PR creation failed: {msg or errors_text}")
                         return ToolResult.failure("GITHUB_CREATE_PR", "\n".join(lines))
                 else:
                     detail = msg or errors_text or "422"
-                    lines.append(f"3. ❌ Tạo PR fail: {detail}")
+                    lines.append(f"3. ❌ PR creation failed: {detail}")
                     return ToolResult.failure("GITHUB_CREATE_PR", "\n".join(lines))
             else:
                 r.raise_for_status()
@@ -162,7 +162,7 @@ async def create_pr(
                     f"3. ✅ PR <{d['html_url']}|#{d['number']}> — {d['title']}"
                 )
     except Exception as e:
-        lines.append(f"3. ❌ Tạo PR lỗi: {e}")
+        lines.append(f"3. ❌ PR creation failed: {e}")
         return ToolResult.failure("GITHUB_CREATE_PR", "\n".join(lines))
 
     # 4. Jira transition — warning, not hard failure.
@@ -175,7 +175,7 @@ async def create_pr(
                 f"4. ⚠️ Jira transition fail ({trans.error_code}): {trans.user_message}"
             )
     except Exception as e:
-        lines.append(f"4. ⚠️ Jira transition lỗi: {e}")
+        lines.append(f"4. ⚠️ Jira transition failed: {e}")
 
     return ToolResult.success("\n".join(lines))
 

@@ -14,7 +14,9 @@
       "WebFetch(domain:support.claude.com)",
       "WebSearch",
       "Skill(update-config)",
-      "Skill(update-config:*)"
+      "Skill(update-config:*)",
+      "Skill(dataviz)",
+      "Skill(dataviz:*)"
     ],
     "deny": [
       "Read(//Users/tyron/Projects/agentic/.env)",

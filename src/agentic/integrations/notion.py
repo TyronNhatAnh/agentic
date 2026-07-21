@@ -27,7 +27,7 @@ _CHILDREN_LIMIT = 100     # max block children per create/append request
 
 def _headers() -> dict[str, str]:
     if not settings.notion_token:
-        raise RuntimeError("NOTION_TOKEN chưa cấu hình")
+        raise RuntimeError("NOTION_TOKEN not configured")
     return {
         "Authorization": f"Bearer {settings.notion_token}",
         "Notion-Version": settings.notion_version,
@@ -136,7 +136,7 @@ def _extract_page_id(ref: str) -> str:
     ref = (ref or "").strip()
     matches = _ID_RE.findall(ref)
     if not matches:
-        raise ValueError(f"không tìm thấy Notion page id trong: {ref!r}")
+        raise ValueError(f"no Notion page id found in: {ref!r}")
     h = matches[-1].replace("-", "").lower()
     return f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
@@ -192,10 +192,10 @@ async def create_page(
     to ``NOTION_PARENT_PAGE_ID``). Returns the page URL on success."""
     parent_id = (parent_id or settings.notion_parent_page_id or "").strip()
     if not parent_id:
-        raise RuntimeError("NOTION_PARENT_PAGE_ID chưa cấu hình (và không truyền parent)")
+        raise RuntimeError("NOTION_PARENT_PAGE_ID not configured (and no parent passed)")
     parent_id = _extract_page_id(parent_id)  # tolerate a pasted URL / bare id
     if not (title or "").strip():
-        raise ValueError("title rỗng")
+        raise ValueError("empty title")
 
     blocks = markdown_to_blocks(markdown)
     body = {
@@ -223,7 +223,7 @@ async def create_page(
             r.raise_for_status()
 
     return ToolResult.success(
-        {"message": f"Đã tạo trang Notion: {url}", "url": url, "id": page_id}
+        {"message": f"Created Notion page: {url}", "url": url, "id": page_id}
     )
 
 
@@ -255,7 +255,7 @@ def _page_read_result(page_id: str, title: str, url: str, body: str) -> ToolResu
     payloads, so omitting it makes a successful read surface as empty text."""
     header = f"# {title}\n<{url}>".strip()
     body = (body or "").strip()
-    message = f"{header}\n\n{body}" if body else f"{header}\n\n_(page không có nội dung block)_"
+    message = f"{header}\n\n{body}" if body else f"{header}\n\n_(page has no block content)_"
     return ToolResult.success(
         {"message": message, "title": title, "url": url, "id": page_id, "markdown": body}
     )
@@ -315,7 +315,7 @@ async def update_page(
     ``replace_body=True`` archives existing content first (full rewrite); else the
     markdown is appended. At least one of title/markdown must be given."""
     if not (title or "").strip() and not (markdown or "").strip():
-        raise ValueError("cần ít nhất title hoặc markdown để cập nhật")
+        raise ValueError("need at least title or markdown to update")
     page_id = _extract_page_id(ref)
     async with httpx.AsyncClient(timeout=30, headers=_headers()) as client:
         pr = await client.get(f"{_API}/pages/{page_id}")
@@ -340,7 +340,7 @@ async def update_page(
         pr.raise_for_status()
         url = pr.json().get("url", "")
     return ToolResult.success(
-        {"message": f"Đã cập nhật trang Notion: {url}", "url": url, "id": page_id}
+        {"message": f"Updated Notion page: {url}", "url": url, "id": page_id}
     )
 
 
@@ -352,9 +352,9 @@ async def archive_page(ref: str, restore: bool = False) -> ToolResult:
         r = await client.patch(f"{_API}/pages/{page_id}", json={"archived": not restore})
         r.raise_for_status()
         url = r.json().get("url", "")
-    verb = "khôi phục" if restore else "xoá (archive)"
+    verb = "restored" if restore else "deleted (archived)"
     return ToolResult.success(
-        {"message": f"Đã {verb} trang Notion: {url}", "url": url, "id": page_id, "archived": not restore}
+        {"message": f"{verb} Notion page: {url}", "url": url, "id": page_id, "archived": not restore}
     )
 
 
@@ -375,4 +375,4 @@ async def execute_action(action_type: str, payload: dict) -> ToolResult:
         )
     if action_type == "notion.delete_page":
         return await archive_page(payload["page"], bool(payload.get("restore", False)))
-    return ToolResult.failure("VALIDATION", f"notion action không hỗ trợ: {action_type}")
+    return ToolResult.failure("VALIDATION", f"unsupported notion action: {action_type}")
