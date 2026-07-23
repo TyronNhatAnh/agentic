@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import subprocess
+import time
 
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
@@ -92,13 +93,69 @@ async def _main() -> None:
         "⚡️ Bolt app started (Socket Mode), workers=%d",
         settings.worker_concurrency,
     )
+    wake_watchdog = asyncio.create_task(
+        _wake_reconnect_watchdog(handler), name="agentic-wake-watchdog"
+    )
     try:
         await handler.start_async()
     finally:
+        wake_watchdog.cancel()
         sweeper.cancel()
         if monitor:
             monitor.cancel()
         await brain_pool.shutdown_all()
+
+
+async def _wake_reconnect_watchdog(
+    handler: AsyncSocketModeHandler,
+    *,
+    tick_s: float = 300.0,
+    jump_threshold_s: float = 30.0,
+) -> None:
+    """Force a fresh Socket Mode session after the host wakes from sleep.
+
+    When the laptop lid closes, macOS suspends this process and severs the
+    network. On wake, aiohttp's WebSocket resumes and ping/pong keeps flowing,
+    so slack_bolt's lost-pong reconnect never fires — but Slack has already
+    dropped the stale session and stops routing events to it (connection looks
+    healthy, zero events arrive). We detect the suspend by watching for a clock
+    jump far larger than our sleep interval, then rebuild the session via a new
+    WSS endpoint so Slack routes events to us again.
+
+    Detection reads BOTH clocks because their sleep behavior differs and is
+    platform-dependent: macOS ``time.monotonic()`` (mach_absolute_time) freezes
+    during suspend, so only the wall clock jumps; elsewhere the reverse can
+    hold. Taking the larger elapsed catches the suspend under either behavior.
+    A spurious fire (e.g. a rare NTP wall-clock correction) is harmless — it
+    just re-establishes an equivalent session. tick_s bounds the worst-case
+    recovery delay after wake (the sleep can't return until it elapses), so keep
+    it modest; the per-tick cost is two clock reads.
+    """
+    log = logging.getLogger(__name__)
+    while True:
+        before_mono = time.monotonic()
+        before_wall = time.time()
+        try:
+            await asyncio.sleep(tick_s)
+        except asyncio.CancelledError:
+            raise
+        elapsed = max(time.monotonic() - before_mono, time.time() - before_wall)
+        # A tick that took much longer than tick_s means the process was frozen
+        # (sleep/suspend), not merely scheduled late.
+        if elapsed < tick_s + jump_threshold_s:
+            continue
+        log.warning(
+            "detected %.0fs process suspend (wake from sleep); forcing Socket "
+            "Mode reconnect to shed stale session",
+            elapsed,
+        )
+        try:
+            await handler.client.connect_to_new_endpoint(force=True)
+            log.info("Socket Mode reconnected to fresh endpoint after wake")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("wake reconnect failed; will retry on next suspend")
 
 
 async def _sdk_idle_sweeper(*pools: ThreadSessionManager) -> None:
