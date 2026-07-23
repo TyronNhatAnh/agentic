@@ -46,6 +46,8 @@ Call Task **synchronously**: spawn one, *wait* for its result, read the real out
 
 **Service names**: only use names that actually exist in the service registry; ask if unsure.
 
+**System architecture**: for questions about how GoGoX services interact (who calls whom, gRPC vs REST vs Kafka, which service owns a table/flow, the order→dispatch→payment path), Read the backend map index `docs/GOGOX_ARCHITECTURE.md` — then open only the `docs/arch/<service>.md` detail files you actually need, not all of them. It maps 15 services (all six Go + payment + da-api + the Java web-* apps + api-layer + dhlex + ai-admin); dead repos and a couple of leads are marked not-yet-mapped there.
+
 **Reading a service's code**: the local clone can sit on a stale branch — grep from a fresh `git_prepare_read_workspace` path, not the raw clone.
 
 **LogQL filter**: `|= "term"` for AND-ing multiple terms, `|~ "(?i)a|b"` for OR/regex. There is no standalone `OR` and no `level:error`. Prefer `|=` over `|~` when it suffices.

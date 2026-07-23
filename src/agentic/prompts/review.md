@@ -36,6 +36,20 @@ Use exactly the structure below — keep the headings, icons, and bold as-is:
 
 A swallowed error (`_ = foo()`), a typo in an exported/imported symbol name, or a hardcoded business constant → **never** rank below `major`.
 
+## Know the system before you judge
+
+For a GoGoX service PR, read the architecture map before ranking findings: the small
+INDEX at `docs/GOGOX_ARCHITECTURE.md` (path in the `github_get_pr_diff` tool
+description), then `docs/arch/features.md` to find the feature the change belongs to and
+the **full set of services it touches**, then `docs/arch/<service>.md` for each of those
+— don't load every service, but don't stop at the PR's own repo either (features cross
+service boundaries, and that edge is where bugs hide). A diff that looks fine in
+isolation can break a cross-service contract: the service a call actually reaches
+(e.g. `DaService` points at the legacy Java `web-api`, not `da-api`; `report-service`
+is bulk-import, not reporting), whether an edge is gRPC/REST/Kafka, which service owns
+a table, or that payment is on PostgreSQL not `gogovan` MySQL. Use it to catch
+contract/ownership breaks, not to pad the review with architecture prose.
+
 ## Content principles
 
 - Findings first, summary after. Don't spend most of the response re-narrating the diff.

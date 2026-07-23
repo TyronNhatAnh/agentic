@@ -49,6 +49,18 @@ _DB_SCHEMA_HINT = (
     "code lookup. "
 )
 
+# Curated map of the GoGoX KR backend (services, call graph, domain flows).
+# Referenced from github_get_pr_diff so a reviewer Reads it before judging
+# cross-service correctness instead of reviewing a diff in a vacuum.
+_ARCH_DOC = Path(__file__).resolve().parents[3] / "docs" / "GOGOX_ARCHITECTURE.md"
+_ARCH_HINT = (
+    f" Before reviewing a GoGoX service PR, Read {_ARCH_DOC} — a small INDEX with "
+    "the topology, call graph and naming traps ('DaService', report-service). Then "
+    "Read docs/arch/features.md (next to the index) to find which feature the change "
+    "touches and its FULL set of services, and Read docs/arch/<service>.md for each of "
+    "those — the repo the PR sits in is rarely the whole story. Don't load every service."
+)
+
 # Match dispatcher.py:103-104 legacy semantics — read-only verbs retry up to
 # 2 times on transient errors, write verbs never retry (timed-out POST may
 # have succeeded server-side, retry would duplicate).
@@ -433,7 +445,7 @@ async def github_get_pr(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "github_get_pr_diff",
-    "Fetch a PR's unified diff, truncated to max_chars (default 20000).",
+    "Fetch a PR's unified diff, truncated to max_chars (default 20000)." + _ARCH_HINT,
     {
         "type": "object",
         "properties": {
