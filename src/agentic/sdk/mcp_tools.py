@@ -814,6 +814,33 @@ async def git_latest_release(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "git_prepare_read_workspace",
+    "Fetch fresh remote code (via GITHUB_TOKEN over HTTPS, no SSH) and check it out into a "
+    "dedicated READ worktree, returning its path. Use this BEFORE grep/read/trace of a "
+    "service's code — the main local clone may sit on a stale branch (e.g. an old `master`), "
+    "so grepping it reads outdated code. Defaults to the latest `releases/*` branch; pass "
+    "`ref` (e.g. a specific `releases/DAPro-2.47` or any branch) to pin another. Grep/read "
+    "the returned `read_path`, not the main clone.",
+    {
+        "type": "object",
+        "properties": {
+            "service": {"type": "string"},
+            "repo": {"type": "string", "description": "owner/name; alternative to service"},
+            "ref": {"type": "string", "description": "Branch to check out; default = latest releases/*"},
+        },
+        "required": [],
+    },
+)
+async def git_prepare_read_workspace(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: git_int.prepare_read_workspace(
+            args.get("service"), args.get("repo"), args.get("ref")
+        ),
+        retryable_read=False, service="git",
+    )
+
+
+@tool(
     "git_prepare_workspace",
     "Create a worktree + feature/<ticket> branch for a service. Base auto-resolved from Jira sprint (releases/DAPro-2.<sprint>).",
     {
@@ -1179,7 +1206,8 @@ _ALL_TOOLS = [
     # registry (1)
     list_services,
     # git (6)
-    git_check_repo, git_latest_release, git_prepare_workspace,
+    git_check_repo, git_latest_release, git_prepare_read_workspace,
+    git_prepare_workspace,
     git_prepare_pr_review_workspace, git_commit, git_push,
     # notion (4)
     notion_create_page, notion_get_page, notion_update_page, notion_delete_page,

@@ -46,6 +46,8 @@ Call Task **synchronously**: spawn one, *wait* for its result, read the real out
 
 **Service names**: only use names that actually exist in the service registry; ask if unsure.
 
+**Reading a service's code**: the local clone can sit on a stale branch — grep from a fresh `git_prepare_read_workspace` path, not the raw clone.
+
 **LogQL filter**: `|= "term"` for AND-ing multiple terms, `|~ "(?i)a|b"` for OR/regex. There is no standalone `OR` and no `level:error`. Prefer `|=` over `|~` when it suffices.
 
 **Loki/Grafana timestamps**: always UTC. When reporting to the user, convert side by side: `HH:MM UTC → HH:MM VN (UTC+7) / HH:MM KST (UTC+9)`.

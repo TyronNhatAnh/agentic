@@ -578,6 +578,143 @@ async def prepare_pr_review_workspace(repo: str, pr: int) -> ToolResult:
     )
 
 
+def _safe_ref_dir(ref: str) -> str:
+    """Filesystem-safe path segment for a git ref (`releases/DAPro-2.47` → `releases__DAPro-2.47`)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "__", ref)
+
+
+async def prepare_read_workspace(service: str | None = None, repo: str | None = None,
+                                 ref: str | None = None) -> ToolResult:
+    """Fetch a ref (default: latest `releases/*`) over HTTPS+token and check it
+    out DETACHED into a dedicated read worktree, so grep/read reflects fresh
+    remote code — not whatever ancient branch the main clone sits on.
+
+    Why a separate worktree instead of checking out the main clone: the main
+    clone may be on an unrelated branch (e.g. a stale `master`) or hold local
+    work; a detached read worktree never clobbers it and never collides with a
+    branch name the clone already has.
+    """
+    svc = None
+    if repo:
+        try:
+            svc = resolve_service_by_github_repo(repo)
+        except ValueError as e:
+            return ToolResult.failure("VALIDATION", str(e))
+    if not svc and service:
+        svc = resolve_service(service)
+    if not svc:
+        target = repo or service or "repo/service"
+        return ToolResult.failure("NOT_FOUND", f"No local mapping for `{target}` in service_repos.")
+
+    repo_path = (svc.get("repo_path") or "").strip()
+    if not repo_path:
+        return ToolResult.failure(
+            "CONFIG",
+            f"Service `{svc['name']}` has no `repo_path` configured (no local clone). "
+            "Set the path in services.json/service_repos first.",
+        )
+    if not Path(repo_path).is_dir() or not Path(repo_path, ".git").exists():
+        return ToolResult.failure(
+            "CONFIG", f"Repo path `{repo_path}` does not exist or is not a git repo."
+        )
+    if not settings.github_token:
+        return ToolResult.failure(
+            "CONFIG",
+            "GITHUB_TOKEN not set — can't fetch over HTTPS, and SSH doesn't work in the sandbox.",
+        )
+    fetch_url, authed_env = await _authed_remote_url(repo_path)
+    if fetch_url == "origin":
+        return ToolResult.failure(
+            "CONFIG", "Remote origin is not a github URL that can be rewritten to HTTPS+token."
+        )
+
+    # Resolve the target ref → its fresh HEAD sha.
+    if ref:
+        target_ref = ref
+        rc, _, err = await _run_git(
+            "fetch", fetch_url,
+            f"+refs/heads/{ref}:refs/remotes/origin/{ref}", "--prune",
+            cwd=repo_path, env=authed_env,
+        )
+        if rc != 0:
+            return ToolResult.failure("GIT_FETCH", f"git fetch `{ref}` error: {err[:200]}")
+        rc, sha, err = await _run_git(
+            "rev-parse", "--verify", f"refs/remotes/origin/{ref}", cwd=repo_path
+        )
+        if rc != 0 or not sha:
+            return ToolResult.failure(
+                "NOT_FOUND", f"Ref `{ref}` not found on origin of `{svc['name']}`."
+            )
+    else:
+        rc, _, err = await _run_git(
+            "fetch", fetch_url,
+            "+refs/heads/releases/*:refs/remotes/origin/releases/*", "--prune",
+            cwd=repo_path, env=authed_env,
+        )
+        if rc != 0:
+            return ToolResult.failure("GIT_FETCH", f"git fetch error: {err[:200]}")
+        rc, out, _ = await _run_git(
+            "for-each-ref", "--sort=-committerdate",
+            "--format=%(refname:short)%09%(objectname)",
+            "refs/remotes/origin/releases/", cwd=repo_path,
+        )
+        lines = [l for l in out.splitlines() if l.strip()]
+        if rc != 0 or not lines:
+            return ToolResult.failure(
+                "NOT_FOUND", f"No `releases/*` branch found on origin of `{svc['name']}`.",
+            )
+        parts = lines[0].split("\t")
+        target_ref = parts[0].removeprefix("origin/")
+        sha = parts[1]
+
+    base = (settings.worktree_dir or "").strip()
+    if base:
+        worktree_path = (Path(base).expanduser() / "_reads" / svc["name"] / _safe_ref_dir(target_ref)).resolve()
+    else:
+        worktree_path = Path(repo_path).resolve() / ".worktrees" / "_reads" / _safe_ref_dir(target_ref)
+
+    if worktree_path.exists():
+        if not Path(worktree_path, ".git").exists():
+            return ToolResult.failure(
+                "CONFIG", f"Read path `{worktree_path}` exists but is not a git worktree."
+            )
+        rc, status, err = await _run_git("status", "--porcelain", cwd=str(worktree_path))
+        if rc != 0:
+            return ToolResult.failure("GIT_STATUS", f"git status error: {err[:300]}")
+        if status.strip():
+            return ToolResult.failure(
+                "DIRTY_WORKTREE",
+                f"Read worktree `{worktree_path}` has local changes, not auto-checking out.",
+            )
+        rc, _, err = await _run_git("checkout", "--detach", sha, cwd=str(worktree_path))
+        if rc != 0:
+            return ToolResult.failure("GIT_CHECKOUT", f"git checkout error: {err[:300]}")
+    else:
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        rc, _, err = await _run_git(
+            "worktree", "add", "--detach", str(worktree_path), sha, cwd=repo_path
+        )
+        if rc != 0:
+            return ToolResult.failure("GIT_WORKTREE", f"git worktree add error: {err[:300]}")
+
+    github_repo = (svc.get("github_repo") or "").strip()
+    return ToolResult.success(
+        {
+            "service": svc["name"],
+            "ref": target_ref,
+            "sha": sha,
+            "read_path": str(worktree_path),
+            "message": (
+                f"Fresh read workspace ready for `{svc['name']}`"
+                f"{f' ({github_repo})' if github_repo else ''}:\n"
+                f"• Ref: `{target_ref}` @ `{sha[:12]}` (fresh fetch over HTTPS+token)\n"
+                f"• Path: `{worktree_path}`\n"
+                f"Grep/read code HERE — the main clone may be on a stale branch."
+            ),
+        }
+    )
+
+
 def _needs_confirmation(*, service: str, ticket: str, base: str,
                         question: str) -> ToolResult:
     """Special ToolResult that the dispatcher persists as pending_confirmation."""
@@ -608,6 +745,9 @@ ACTION_HANDLERS = {
     "git.latest_release": lambda p: latest_release_branch(
         p.get("service"), p.get("repo")
     ),
+    "git.prepare_read_workspace": lambda p: prepare_read_workspace(
+        p.get("service"), p.get("repo"), p.get("ref")
+    ),
 }
 
 
@@ -618,6 +758,7 @@ ACTION_HANDLERS = {
 _MUTATING_ACTIONS = {
     "git.prepare_workspace",
     "git.prepare_pr_review_workspace",
+    "git.prepare_read_workspace",
     "git.commit",
     "git.push",
 }
@@ -643,6 +784,12 @@ def _repo_path_for_action(action_type: str, payload: dict) -> str | None:
     try:
         if action_type == "git.prepare_pr_review_workspace":
             svc = resolve_service_by_github_repo(payload.get("repo", "") or "")
+        elif action_type == "git.prepare_read_workspace":
+            # Accepts either repo or service; prefer whichever resolves.
+            repo = payload.get("repo", "") or ""
+            svc = resolve_service_by_github_repo(repo) if repo else None
+            if not svc:
+                svc = resolve_service(payload.get("service", "") or "")
         else:
             svc = resolve_service(payload.get("service", "") or "")
     except ValueError:
