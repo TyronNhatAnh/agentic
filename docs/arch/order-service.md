@@ -4,9 +4,15 @@ Detail file for [the backend map](../GOGOX_ARCHITECTURE.md). Release `DAPro-2.13
 Gin + gRPC, shared `gogovan` MySQL. Module `github.com/gogovan/ggx-kr-order-service`.
 
 ## Owns
-Order lifecycle (submit/update/cancel/reorder/tip), price estimation/quoting, admin
-dispatch & assignment, home-moving orders, coupons, e-tax, statement-of-use reports,
-B2B DHL/Mobis integration. System of record for `orderrequest` & friends.
+Order lifecycle (submit/update/cancel/reorder/tip), admin dispatch & assignment,
+home-moving orders, coupons, e-tax, statement-of-use reports, B2B DHL/Mobis integration.
+System of record for `orderrequest` & friends.
+
+**Owns the core estimate/quote API** — `POST /api/v1/estimate` (auth) + `/guest/estimate`
+(`routes.go:56,129` → `orderHandler.Estimate*`), implemented in
+`internal/application/order/queries/estimate/`. Estimate logic lives **here**, not in
+common (which only supplies pricing reference data) or web-api (its own separate `fares`
+engine). A PR changing estimate/quoting behavior is an order-service change.
 
 ## Inbound
 - HTTP (`:5000`): `/api/v1/{orders,guest,admin,report,etax,home-moving,coupons}`.

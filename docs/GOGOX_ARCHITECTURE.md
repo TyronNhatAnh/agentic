@@ -115,6 +115,17 @@ order-service **is** the Kafka `submit-order` producer — web-api's Kafka is di
 bulk order import (Excel → validate → submit via order-service). Reporting/gRPC
 scaffolding is a stub; it runs no SQL. Don't review it as analytics/export.
 
+**Single-owner facts (easy to get wrong in review):**
+- **`gogovan` schema migrations → `common-service` ONLY.** It's the one service with real
+  `migrations/*.sql`; the others carry migration tooling in `vendor/` but no migration
+  files. A migration added in order/user/driver/etc. is misplaced.
+- **Core estimate/quote API → `order-service`** (`POST /estimate`, `/guest/estimate`).
+  `common` only supplies pricing reference data; `web-api` has its own `fares` engine.
+  Don't attribute estimate elsewhere.
+- **Order tables → primary owner `web-api`** (Go order-service coexists; mid-migration).
+- **payment → own PostgreSQL** (not `gogovan` MySQL). **Admin RBAC → `gogovan` tables**,
+  enforced in-process, not via user-service.
+
 ---
 
 ## Cross-service call graph

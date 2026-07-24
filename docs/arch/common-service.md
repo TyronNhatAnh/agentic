@@ -9,6 +9,14 @@ pricing, home-moving goods catalog + pricing, address search/geocoding, regions,
 CMS content/ads, S3 presigned URLs, and the **universal audit log** (`auditlog`,
 AES-256-GCM) + action log.
 
+**Owns the schema migrations for the shared `gogovan` MySQL — and is the ONLY service
+that does.** It carries real migration SQL in `migrations/*.sql` (e.g. pricing,
+orderamount changes). The other Go services (order/user/driver/notification/report)
+ship only the migration *tooling* in `vendor/…/command/migration*`, with **no migration
+files of their own**. So any PR that adds/alters a `gogovan` table (a new
+`migrations/*.up.sql`) belongs in common-service; a migration landing in another
+service's repo is a red flag.
+
 ## Inbound
 - HTTP: `/api/v1/{vehicles,addresses,admin,guest}` + a service-to-service
   `/api/v1/guest/audit-logs` gated by an HMAC `apikey` (used by the Java web-* apps
@@ -33,8 +41,10 @@ Redis pub/sub.
 ## Data (`gogovan` MySQL)
 `commoncode`, `configuration`, `vehicle`, `vehiclepool`, `vehiclepoolmetadata`,
 `vehiclemetadata`, `vehicleprice`, `extraprice`, `homemovinggoods*`, `region`,
-`content`, `address`, `actionlog`, `auditlog`. Migrations reference order/DA views
-(`vworderforda`, `vwordersimpleforadmin`) — HYPOTHESIS: some shared views maintained here.
+`content`, `address`, `actionlog`, `auditlog`. **The `gogovan` schema migrations live
+here** (`migrations/*.sql`) — this is the single migration owner for the shared DB (see
+Owns). Migrations also define/maintain shared views (`vworderforda`,
+`vwordersimpleforadmin`) other services read.
 
 ## Core flows
 - **Address + geocode (gRPC `GetAddress`):** → `AddressService` → business backend

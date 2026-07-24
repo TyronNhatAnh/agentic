@@ -31,10 +31,10 @@ have a legacy path and a Go path live at the same time — check which one the d
 
 ## Pricing & money
 
-**Pricing / estimate** — `order`, `common`, `web-api` (fares)
-- Entry: order `internal/application/order/queries/estimate/`; common `internal/application/implement/vehicle_service.go`; web-api `PricingCalculationEngineV1`.
+**Pricing / estimate** — `order` (**owns core estimate API**), `common` (pricing reference data), `web-api` (fares engine)
+- Entry: order `internal/application/order/queries/estimate/estimate_handler.go` (routes `POST /estimate`, `/guest/estimate`); common `internal/application/implement/vehicle_service.go` (`GetPriceIdsByOrganizationId` only); web-api `PricingCalculationEngineV1`.
 - Data: `zoneprice`, `extraprice`, `specialprice`, `organizationpricing`; web-api → `staging.api.gogox.co.kr/fares/orders/{id}`.
-- Watch: **order↔common call each other** (`GetPriceIdsByOrganizationId`) — cycle risk. Two pricing engines exist (Go estimate + web-api fares). Kakao Map supplies distance/time.
+- Watch: **the core estimate API is order-service** — common only supplies price IDs/reference data, web-api `fares` is a downstream call. Don't attribute estimate to common/web-api. `order↔common` call each other (`GetPriceIdsByOrganizationId`) — cycle risk; Kakao Map supplies distance/time.
 
 **Payment / charge / reconciliation** — `payment`, `order`, `user`
 - Entry: payment `PaymentServiceImpl` (`/payment/make-payment`), `ReconciliationScheduler`; gateways `OrderIntegrationGateway`/`UserIntegrationGateway`.
@@ -64,6 +64,12 @@ have a legacy path and a Go path live at the same time — check which one the d
 **Driver location** — `driver`, `da-api`
 - Entry: driver `POST /guest/driver-location` → Firestore (AES-128); da-api `firestore_service.rb`, GGT → Kinesis.
 - Watch: location is in **Firestore**, not MySQL; encrypted at rest.
+
+## Schema & data
+
+**DB schema migration (`gogovan` MySQL)** — `common` **ONLY**
+- Entry: common `migrations/*.up.sql` / `*.down.sql`. Other Go services carry migration *tooling* in `vendor/…/command/migration*` but **no migration files** — they do not run migrations.
+- Watch: a PR that adds/alters a `gogovan` table must land in **common-service**. A migration file in order/user/driver/notification/report is misplaced — flag it. Shared views (`vworderforda`, …) are defined by common's migrations too.
 
 ## B2B, admin, batch
 
