@@ -16,7 +16,8 @@
       "Skill(update-config)",
       "Skill(update-config:*)",
       "Skill(dataviz)",
-      "Skill(dataviz:*)"
+      "Skill(dataviz:*)",
+      "WebFetch(domain:claude.ai)"
     ],
     "deny": [
       "Read(//Users/tyron/Projects/agentic/.env)",

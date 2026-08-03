@@ -36,6 +36,17 @@ Use exactly the structure below — keep the headings, icons, and bold as-is:
 
 A swallowed error (`_ = foo()`), a typo in an exported/imported symbol name, or a hardcoded business constant → **never** rank below `major`.
 
+## Get the real source before cross-checking
+
+`github_get_pr_diff` gives you the diff text only. Before reading/grepping any file to
+verify context around the diff (call sites, existing tests, sibling logic), call
+`git_prepare_pr_review_workspace(repo, pr)` first — it fetches the PR head into a
+dedicated review worktree and returns its path. Read/Grep **that path**, not whatever
+checkout happens to already exist locally — a different local checkout (main, another
+branch/PR) will silently show you stale or wrong code. If the tool fails with
+NOT_FOUND/CONFIG (no local repo mapping configured), say so explicitly in the review
+instead of falling back to an unrelated local path, and rely on the diff text alone.
+
 ## Know the system before you judge
 
 For a GoGoX service PR, read the architecture map before ranking findings: the small
