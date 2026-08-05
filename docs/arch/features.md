@@ -59,7 +59,11 @@ have a legacy path and a Go path live at the same time — check which one the d
 **Notification / OTP / push** — `notification`, `user`, `common`
 - Entry: notification `send_otp_sms_handler.go`, `notification_service.go`; called by user/order via gRPC.
 - Data: `CustomerNotify`, `MSG_QUEUE`, OTP in Redis; providers FCM/CJ MPlace/MessageBird/Twilio/SendGrid.
-- Watch: notification's **Kafka consumer is dead** — delivery is gRPC/HTTP only. Hardcoded SendGrid key in stag config (secret leak).
+- Watch: notification's **Kafka consumer is dead** — delivery is gRPC/HTTP only. Hardcoded SendGrid key in stag config (secret leak). `MSG_QUEUE` has a **second, independent writer** — see below.
+
+**Legacy order push/SMS (web-api → node-message)** — `web-api`, `node-message`
+- Entry: web-api `NetSocketServiceImpl.sendOrderToDriver`/`MsgOrderData` (raw TCP socket, `socket.message.server` config) → node-message `message.js` dispatcher → `messageservice.js` `smsOrderInfo` (create/cancel/arrange/complete) → FCM push (`fcmservice.js`) and/or `MessageDao.createSms` → `MSG_QUEUE`.
+- Watch: **no Go service calls node-message directly** — only web-api does, over a raw socket, not Kong/gRPC. It writes into the **same `MSG_QUEUE` table** as the Go `notification-service`'s legacy SMS/Kakao fallback — two producers, one consumer-side queue. See [arch/node-message.md](node-message.md).
 
 **Driver location** — `driver`, `da-api`
 - Entry: driver `POST /guest/driver-location` → Firestore (AES-128); da-api `firestore_service.rb`, GGT → Kinesis.
@@ -96,6 +100,7 @@ have a legacy path and a Go path live at the same time — check which one the d
 
 ---
 
-*Coverage: features derived from the 15 mapped services (release DAPro-2.130). If a PR
-doesn't fit a row here, fall back to the call graph in the index + the repo's own
-`arch/<service>.md`, and add a feature row when the gap is real.*
+*Coverage: features derived from the 16 mapped services (release DAPro-2.130;
+node-message default branch). If a PR doesn't fit a row here, fall back to the call
+graph in the index + the repo's own `arch/<service>.md`, and add a feature row when the
+gap is real.*

@@ -62,6 +62,7 @@ the Go APIs).
 | api-layer | Ruby/Rails | Customer-app **BFF** over web-api + Go services | [arch/api-layer.md](arch/api-layer.md) |
 | dhlex-service | Java (Spring Boot 3.1) | DHL parcel-scan → GoGoX order bridge (**dormant**) | [arch/dhlex-service.md](arch/dhlex-service.md) |
 | ai-admin-assistant | Python (FastAPI) | KR admin **chatbot** (Gemini) over the Go services | [arch/ai-admin-assistant.md](arch/ai-admin-assistant.md) |
+| node-message | Node.js | Legacy order push/SMS socket server ("MessageServer") — called only by web-api | [arch/node-message.md](arch/node-message.md) |
 
 Not yet mapped (see §5): a separate GoGoX **pricing/fares** service; dead repos
 (web-b2c, web-driver, gogox-service); da-api-v2. web-library is the shared Java client lib.
@@ -115,6 +116,11 @@ order-service **is** the Kafka `submit-order` producer — web-api's Kafka is di
 bulk order import (Excel → validate → submit via order-service). Reporting/gRPC
 scaffolding is a stub; it runs no SQL. Don't review it as analytics/export.
 
+**3. `MSG_QUEUE` has two independent writers** — the Go `notification-service` (legacy
+KR SMS/Kakao fallback) and the legacy Node `node-message` server (`MessageDao.createSms`,
+reached only via web-api's raw socket). A PR on either side that assumes it's the sole
+producer into that table is wrong; see [arch/node-message.md](arch/node-message.md).
+
 **Single-owner facts (easy to get wrong in review):**
 - **`gogovan` schema migrations → `common-service` ONLY.** It's the one service with real
   `migrations/*.sql`; the others carry migration tooling in `vendor/` but no migration
@@ -162,9 +168,9 @@ the **legacy Java backend** sit at the edges over HTTP.
 
 ## 5. Not-yet-mapped (leads only — verify before relying)
 
-Fifteen services have detail files (6 Go + payment + da-api + web-api + web-admin +
-web-b2b + web-systemAdmin + api-layer + dhlex + ai-admin). Every live service in
-`services.json` is now mapped. Still outstanding:
+Sixteen services have detail files (6 Go + payment + da-api + web-api + web-admin +
+web-b2b + web-systemAdmin + api-layer + dhlex + ai-admin + node-message). Every live
+service in `services.json` is now mapped. Still outstanding:
 
 - **GoGoX pricing/fares service** — `web-api` calls `staging.api.gogox.co.kr/fares/orders/{id}`
   for fare computation. Not in `services.json`, no local clone; a real dependency worth
@@ -183,5 +189,6 @@ models) and add a `docs/arch/<service>.md` + a row in the service table.
 ---
 
 *Sources: latest release branch of each of the 15 extracted repos (mostly
-`DAPro-2.130`; dhlex `DAPro-2.68`, dormant) + the ops skills (gateway, Loki).
+`DAPro-2.130`; dhlex `DAPro-2.68`, dormant) + the ops skills (gateway, Loki); node-message
+read from default branch (no release-branch convention confirmed).
 Regenerate when the architecture shifts — a stale map is worse than none.*
