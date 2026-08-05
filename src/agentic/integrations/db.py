@@ -9,9 +9,9 @@ connection was unusable. We now go through ``ggx-kr-order-service``'s
 ``POST /api/v1/admin/orders/debug/query`` admin endpoint instead — it runs one
 read-only statement against the read replica and returns ``{"rowCount", "rows"}``.
 The route ships on all envs (PR #1084 removed the env gate); ``query`` targets
-staging and ``query_prod`` targets the prod replica (``@@read_only=1``). The prod
-path hits real customer PII, so its tool (``db_query_prod``) is in CONFIRM_TOOLS
-and always prompts for a Slack button before it runs.
+staging and ``query_prod`` targets the prod replica (``@@read_only=1``). Both run
+inline (no Slack confirm) — a prod-read turn fans out to many queries, so the
+read-only guard + replica + server audit log are the control, not a per-call button.
 
 Safety is layered — the server validates (allowed prefixes, banned DML keywords,
 single statement, LIMIT 1000, 15s timeout, audit log), and Python adds a client-side
@@ -271,8 +271,8 @@ async def _get_prod_token(*, force: bool) -> tuple[str | None, ToolResult | None
 
 async def query_prod(sql: str) -> ToolResult:
     """Run one read-only statement against the PRODUCTION read replica via the
-    order-service debug-query admin API. Gated by CONFIRM_TOOLS (Slack button) —
-    hits real customer PII and is audit-logged.
+    order-service debug-query admin API. Runs inline (no Slack confirm) — hits real
+    customer PII and is audit-logged server-side.
 
     Token resolution: a static ORDER_DEBUG_PROD_ADMIN_TOKEN wins; otherwise the
     prod admin manual-login form is used to mint one (cached, auto-renewed on a

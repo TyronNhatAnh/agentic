@@ -49,18 +49,17 @@ async def test_pending_permissions_resolve_unknown():
 
 def test_confirm_tools_gate_destructive_pr_ops():
     """github_merge_pr / github_approve_pr must require confirm — they have
-    user-visible side effects and aren't in any allowed_tools list. db_query_prod
-    is read-only but hits prod PII, so it's gated too. Matched in both bare and
-    `mcp__agentic__`-prefixed form. Bash push stays inline."""
-    assert CONFIRM_TOOLS == {"github_merge_pr", "github_approve_pr", "db_query_prod"}
+    user-visible side effects and aren't in any allowed_tools list. Matched in
+    both bare and `mcp__agentic__`-prefixed form. Bash push stays inline."""
+    assert CONFIRM_TOOLS == {"github_merge_pr", "github_approve_pr"}
     assert CONFIRM_BASH_PATTERNS == ()
     assert _needs_confirm("Bash", {"command": "git push origin main"}) is False
     assert _needs_confirm("github_merge_pr", {}) is True
     assert _needs_confirm("mcp__agentic__github_merge_pr", {}) is True
     assert _needs_confirm("mcp__agentic__github_approve_pr", {}) is True
     assert _needs_confirm("mcp__agentic__github_get_pr", {}) is False
-    # prod DB gated; staging DB stays inline (read-only, no PII).
-    assert _needs_confirm("mcp__agentic__db_query_prod", {}) is True
+    # Both DB tools run inline — read-only guard + replica, no button per query.
+    assert _needs_confirm("mcp__agentic__db_query_prod", {}) is False
     assert _needs_confirm("mcp__agentic__db_query", {}) is False
 
 

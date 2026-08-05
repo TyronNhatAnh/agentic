@@ -60,8 +60,8 @@ class Settings(BaseSettings):
     order_debug_admin_token: str = Field(default="", alias="ORDER_DEBUG_ADMIN_TOKEN")
     # PRODUCTION variant (the db_query_prod tool). Same debug endpoint, but the prod
     # host + a genuine prod AdminUser token, backed by a physical read replica
-    # (@@read_only=1). Hits real customer PII, so the tool is in CONFIRM_TOOLS — it
-    # always prompts for a Slack button. Empty base URL or token = db_query_prod off.
+    # (@@read_only=1). Runs inline (no Slack confirm) — reads real customer PII, so
+    # the audit log is the control. Empty base URL or token = db_query_prod off.
     order_debug_prod_base_url: str = Field(default="", alias="ORDER_DEBUG_PROD_BASE_URL")
     order_debug_prod_admin_token: str = Field(default="", alias="ORDER_DEBUG_PROD_ADMIN_TOKEN")
     # Auto-login fallback: when ORDER_DEBUG_PROD_ADMIN_TOKEN is empty, the prod path
