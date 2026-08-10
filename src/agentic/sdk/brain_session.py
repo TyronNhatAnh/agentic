@@ -126,8 +126,19 @@ def make_brain_options_factory(
             can_use_tool=cb,
             agents=agents,
             hooks=build_brain_hooks(thread_ts=thread_ts, channel=channel),
+            # The SDK derives SessionKey.project_key from cwd, so an unbound store
+            # would key every thread on the repo path — see session_store docstring.
             resume=row.get("sdk_session_id") or None,
-            session_store=session_store,
+            session_store=(
+                session_store.for_thread(thread_ts)
+                if hasattr(session_store, "for_thread")
+                else session_store
+            ),
+            # Empty = load no user/project/local settings. Unset would make the CLI
+            # fall back to its own default (user+project+local), which pulled the
+            # host's personal ~/.claude skills listing into the bot's prefix — off
+            # topic, and its Vietnamese trigger phrases drifted the reply language.
+            setting_sources=[],
             cwd=cwd,
             add_dirs=add_dirs,
         )

@@ -239,6 +239,31 @@ async def test_session_store_adapter_round_trip():
     assert await store.load(sub) is None
 
 
+async def test_session_store_bound_to_thread_ignores_project_key():
+    """Two threads on the same repo share one SDK-derived project_key. A bound
+    store must key on thread_ts, else B's append prunes A's transcript and the
+    resume token never lands on the thread row."""
+    from agentic.sdk.session_store import SqliteSessionStore
+    from agentic.store import get_thread, init_db, touch_thread
+
+    init_db()
+    project_key = "-Users-tyron-repo-shared"
+    a, b = "T_BIND_A", "T_BIND_B"
+    for t in (a, b):
+        touch_thread(t, "C")
+    store_a = SqliteSessionStore().for_thread(a)
+    store_b = SqliteSessionStore().for_thread(b)
+    key_a = {"project_key": project_key, "session_id": "sess-a"}
+    key_b = {"project_key": project_key, "session_id": "sess-b"}
+    await store_a.append(key_a, [{"role": "user", "n": 1}])
+    await store_b.append(key_b, [{"role": "user", "n": 2}])
+
+    assert await store_a.load(key_a) == [{"role": "user", "n": 1}]
+    assert await store_b.load(key_b) == [{"role": "user", "n": 2}]
+    assert get_thread(a)["sdk_session_id"] == "sess-a"
+    assert get_thread(b)["sdk_session_id"] == "sess-b"
+
+
 # ============================================================================
 # #3 — per-repo git lock
 # ============================================================================

@@ -10,9 +10,9 @@ Naming: ``<integration>_<verb>`` snake_case — MCP tool names cannot contain
 ``.``, and snake_case matches ``CONFIRM_TOOLS`` in ``permission.py``. The
 mapping to legacy ``action_type`` is a literal ``.`` ↔ ``_`` swap.
 
-Confirm contract (§12.I): ``github_approve_pr`` and ``github_merge_pr`` are
-invoked with ``confirmed=True`` here — Phase 1 ``can_use_tool`` callback owns
-the user prompt. ``git_prepare_workspace`` and ``git_commit`` also pass
+Confirm contract (§12.I): tools are invoked with ``confirmed=True`` here — the
+legacy per-tool prompt is dead; gating lives in ``CONFIRM_TOOLS`` +
+``can_use_tool``. ``git_prepare_workspace`` and ``git_commit`` also pass
 ``confirmed=True`` because the SDK path does not bubble ``NEEDS_CONFIRMATION``
 results to Slack; if those tools need a guard later, add them to
 ``CONFIRM_TOOLS`` rather than re-enabling the legacy prompt.
@@ -233,7 +233,8 @@ async def github_add_assignees(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "github_approve_pr",
-    "Submit an APPROVE review on a pull request. User confirmation is handled by the permission callback — do not ask twice.",
+    "Submit an APPROVE review on a pull request. Runs inline (no Slack confirm) — "
+    "used to auto-LGTM a PR whose review verdict is APPROVE.",
     {
         "type": "object",
         "properties": {

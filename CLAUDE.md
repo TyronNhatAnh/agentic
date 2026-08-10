@@ -38,7 +38,7 @@ The brain emits native `tool_use` blocks; the SDK validates input against each `
 
 ## Permission / confirmation flow for destructive actions
 
-`github_merge_pr` and `github_approve_pr` (the `CONFIRM_TOOLS` set, [sdk/permission.py](src/agentic/sdk/permission.py)) require user confirmation. The mechanism is a `can_use_tool` callback, **not** text parsing:
+`github_merge_pr` (the `CONFIRM_TOOLS` set, [sdk/permission.py](src/agentic/sdk/permission.py)) requires user confirmation. `github_approve_pr` deliberately does not — the review flow auto-LGTMs a PR whose verdict is APPROVE. The mechanism is a `can_use_tool` callback, **not** text parsing:
 
 - The brain calls the tool → the callback (`build_slack_permission_callback`) checks the whitelist, posts a Slack message with ✅/❌ block-kit buttons, creates an in-memory `asyncio.Future` keyed by `req_id`, and `await`s it (timeout 5' → auto-Deny).
 - The user clicks a button → the `perm_allow`/`perm_deny` action handler calls `pending.resolve(req_id, allow)`, which completes the Future → the callback returns `PermissionResultAllow/Deny`. The SDK session blocks in its own async context, so nothing is persisted across turns.

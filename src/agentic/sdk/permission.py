@@ -11,9 +11,8 @@ Phase 1 ships the machinery with empty whitelists. Why empty: the SDK skips
 `can_use_tool` for any tool already in `allowed_tools` / `permission_mode`
 ([SDK types.py:1748-1758](file:///tmp/casdk/unpacked/claude_agent_sdk/types.py#L1748)),
 and the dev agent allow-lists `Bash(git push:*)` etc. for end-to-end flow.
-Phase 2 populates CONFIRM_TOOLS with `github_merge_pr` / `github_approve_pr`
-once the MCP server exposes them — those won't be in `allowed_tools` so the
-callback will actually fire. If we ever need to gate an already-allowed tool,
+Phase 2 populates CONFIRM_TOOLS with `github_merge_pr` — it isn't in
+`allowed_tools` so the callback actually fires. If we ever need to gate an already-allowed tool,
 use a `PreToolUse` hook instead (Phase 4).
 """
 
@@ -61,18 +60,22 @@ SESSION_DISALLOWED_TOOLS: list[str] = [
 
 # Tools that always require user confirm via Slack button — those with
 # user-visible side effects. None are in any `allowed_tools` list, so the SDK
-# actually routes them through this callback. `github_approve_pr` has no
-# server-side guard at all; `github_merge_pr` keeps its mergeable_state guard but
-# still must not merge without a human in the loop. Stored as bare names —
-# `_needs_confirm` strips the `mcp__<server>__` prefix the control protocol uses
-# so either form matches.
+# actually routes them through this callback. `github_merge_pr` keeps its
+# mergeable_state guard but still must not merge without a human in the loop.
+# Stored as bare names — `_needs_confirm` strips the `mcp__<server>__` prefix the
+# control protocol uses so either form matches.
+#
+# `github_approve_pr` is deliberately NOT here: the review flow auto-approves
+# (LGTM) when the review sub-agent's verdict is APPROVE, and a button on every
+# clean PR defeats that. An approval is reversible (dismiss/re-request) and merge
+# is still gated, so the human stays in the loop where it matters.
 #
 # `db_query_prod` is deliberately NOT here: a prod-read turn fans out to many
 # queries, so one button per call made it unusable. Writes are already impossible
 # (guard_sql allows one read-only statement; the replica is @@read_only=1), and
 # every call stays audit-logged server-side — the gate only bought a human
 # green-light on reading PII, which the operator chose to drop.
-CONFIRM_TOOLS: set[str] = {"github_merge_pr", "github_approve_pr"}
+CONFIRM_TOOLS: set[str] = {"github_merge_pr"}
 
 # Bash commands whose `command` field, when prefix-matched, triggers confirm.
 # Phase 1: empty (push allowed inline). Phase 2 may revisit.
