@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,7 +29,9 @@ class JobRunner:
     def __init__(self, handler: HandlerFn, concurrency: int = 4) -> None:
         self._handler = handler
         self._queue: asyncio.Queue[Job] = asyncio.Queue()
-        self._busy: set[str] = set()
+        # thread_ts -> submit time, so a rejected message can tell the user how
+        # long the in-flight job has been running instead of a bare "busy".
+        self._busy: dict[str, float] = {}
         self._workers: list[asyncio.Task] = []
         self._concurrency = concurrency
 
@@ -42,9 +45,14 @@ class JobRunner:
         """Returns False if the thread already has a job in flight."""
         if job.thread_ts in self._busy:
             return False
-        self._busy.add(job.thread_ts)
+        self._busy[job.thread_ts] = time.monotonic()
         await self._queue.put(job)
         return True
+
+    def busy_elapsed_s(self, thread_ts: str) -> float | None:
+        """Seconds the thread's in-flight job has been running, None if idle."""
+        started = self._busy.get(thread_ts)
+        return None if started is None else time.monotonic() - started
 
     async def _worker(self, idx: int) -> None:
         log.info("worker %d started", idx)
@@ -74,5 +82,5 @@ class JobRunner:
                 except Exception:
                     log.exception("worker %d fallback reply also failed", idx)
             finally:
-                self._busy.discard(job.thread_ts)
+                self._busy.pop(job.thread_ts, None)
                 self._queue.task_done()

@@ -13,6 +13,16 @@ log = logging.getLogger(__name__)
 
 _MENTION_RE = re.compile(r"<@([A-Z0-9]+)>\s*")
 _BUSY_MSG = "⏳ Still running a previous job, hang on."
+
+
+def _busy_msg(elapsed_s: float | None) -> str:
+    """Bare "busy" reads the same whether the job started 5s or 6min ago — the
+    elapsed time is what tells the user it's stalled rather than working."""
+    if elapsed_s is None:
+        return _BUSY_MSG
+    s = int(elapsed_s)
+    pretty = f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
+    return f"⏳ Still running a previous job ({pretty} so far), hang on."
 # Block Kit markdown blocks allow 12,000 chars cumulatively per payload; one
 # block per message, kept just under the cap to leave room for any suffix.
 _SLACK_CHUNK_LEN = 11800
@@ -309,7 +319,7 @@ def register(
         )
         accepted = await runner.submit(job)
         if not accepted:
-            await reply(_BUSY_MSG)
+            await reply(_busy_msg(runner.busy_elapsed_s(thread_ts)))
 
     @app.event("message")
     async def on_message(event, client):

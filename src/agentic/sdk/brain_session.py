@@ -47,6 +47,11 @@ _STREAM_EDIT_INTERVAL_S = 1.5
 # _safe_placeholder_update (the only streaming-edit site) after truncation so it's
 # never clipped, and adds no extra chat.update calls (§8 2026-05-30 rate-limit guard).
 _STREAM_SUFFIX = "\n\n_⏳ processing…_"
+# The stream only edits the placeholder when the SDK emits a message. A stalled
+# API call emits nothing (2026-08-07: one turn sat 344s between query and first
+# token), leaving the placeholder frozen on the initial text — indistinguishable
+# from a dead bot. The heartbeat edits in that gap with the elapsed time.
+_HEARTBEAT_INTERVAL_S = 20
 
 
 @dataclass
@@ -220,8 +225,7 @@ async def run_brain_session(
     ))
 
     text_parts: list[str] = []
-    last_edit = 0.0
-    last_rendered = ""
+    progress = _Progress(slack_client, channel_id, placeholder_ts, t_start)
     tool_use_count = 0
     last_tool_label = ""
     result_msg: ResultMessage | None = None
@@ -236,6 +240,8 @@ async def run_brain_session(
     # discarded below — its receive stream is half-consumed and unsafe to reuse.
     deadline = settings.brain_timeout_s if settings.brain_timeout_s > 0 else None
     timed_out = False
+    stop_heartbeat = asyncio.Event()
+    heartbeat = asyncio.create_task(_heartbeat(progress, stop_heartbeat))
     try:
         async with asyncio.timeout(deadline):
             async for msg in client.receive_response():
@@ -246,7 +252,6 @@ async def run_brain_session(
                         elif isinstance(block, ToolUseBlock):
                             tool_use_count += 1
                             last_tool_label = _tool_label(block.name)
-                    now = time.monotonic()
                     # Stream the brain's prose once it starts; until then surface
                     # tool activity so the placeholder reflects progress instead of
                     # freezing on the initial "Processing…" for the whole tool phase
@@ -254,18 +259,7 @@ async def run_brain_session(
                     view = "".join(text_parts) or _tool_progress(
                         last_tool_label, tool_use_count
                     )
-                    if (
-                        view
-                        and view != last_rendered
-                        and now - last_edit >= _STREAM_EDIT_INTERVAL_S
-                    ):
-                        cooldown = await _safe_placeholder_update(
-                            slack_client, channel_id, placeholder_ts, view,
-                        )
-                        # On a Slack 429 push the next allowed edit out by Retry-After
-                        # so the stream stops hammering chat.update.
-                        last_edit = now + cooldown
-                        last_rendered = view
+                    await progress.render(view)
                 elif isinstance(msg, ResultMessage):
                     result_msg = msg
                     break
@@ -279,6 +273,9 @@ async def run_brain_session(
     except Exception as e:
         log.exception("brain session stream failed thread=%s", thread_ts)
         error = str(e) or e.__class__.__name__
+    finally:
+        stop_heartbeat.set()
+        await asyncio.gather(heartbeat, return_exceptions=True)
 
     # The pooled client's in-flight receive_response generator is left pending on a
     # timeout — reusing it next turn would interleave two streams. Discard it; the
@@ -393,6 +390,73 @@ def _tool_progress(tool_label: str, count: int) -> str:
         return ""
     steps = f" · {count} steps" if count > 1 else ""
     return f"🔧 running `{tool_label}`{steps}"
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
+
+
+class _Progress:
+    """Single owner of the placeholder edit slot, shared by the stream loop and
+    the heartbeat. The lock keeps the two from interleaving `chat.update` calls
+    on the same message; the debounce is the Slack rate-limit guard (§8)."""
+
+    def __init__(self, client: Any, channel: str, ts: str, t_start: float) -> None:
+        self._client = client
+        self._channel = channel
+        self._ts = ts
+        self._t_start = t_start
+        self._lock = asyncio.Lock()
+        self._last_edit = 0.0
+        self._last_rendered = ""
+
+    async def render(self, view: str) -> None:
+        """Stream edit — skipped when the content hasn't changed or we edited
+        within the debounce window."""
+        async with self._lock:
+            now = time.monotonic()
+            if (
+                not view
+                or view == self._last_rendered
+                or now - self._last_edit < _STREAM_EDIT_INTERVAL_S
+            ):
+                return
+            await self._push(view, now)
+            self._last_rendered = view
+
+    async def render_heartbeat(self) -> None:
+        """Elapsed-time edit, only when the placeholder has gone stale. Keeps
+        `_last_rendered` untouched so the stream's dedupe still compares against
+        real content, not the heartbeat line."""
+        async with self._lock:
+            now = time.monotonic()
+            if now - self._last_edit < _HEARTBEAT_INTERVAL_S:
+                return
+            waiting = f"⏳ waiting for the model… {_fmt_elapsed(now - self._t_start)}"
+            base = self._last_rendered
+            await self._push(f"{base}\n\n{waiting}" if base else waiting, now)
+
+    async def _push(self, view: str, now: float) -> None:
+        cooldown = await _safe_placeholder_update(
+            self._client, self._channel, self._ts, view
+        )
+        # On a Slack 429 push the next allowed edit out by Retry-After so we stop
+        # hammering chat.update.
+        self._last_edit = now + cooldown
+
+
+async def _heartbeat(progress: _Progress, stop: asyncio.Event) -> None:
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=_HEARTBEAT_INTERVAL_S)
+            return
+        except TimeoutError:
+            pass
+        try:
+            await progress.render_heartbeat()
+        except Exception:  # a failed edit must never kill the turn
+            log.exception("heartbeat placeholder update failed")
 
 
 async def _safe_placeholder_update(

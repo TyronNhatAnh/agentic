@@ -11,11 +11,13 @@ class Settings(BaseSettings):
     claude_bin: str = Field(default="claude", alias="CLAUDE_BIN")
     claude_timeout: int = Field(default=300, alias="CLAUDE_TIMEOUT")
     # Models pinned per role so behavior is deterministic instead of inheriting
-    # whatever the host `claude` CLI defaults to. Aliases (opus/sonnet/haiku) are
-    # resolved by the CLI to its current version of each family.
-    brain_model: str = Field(default="opus", alias="BRAIN_MODEL")
-    dev_model: str = Field(default="opus", alias="DEV_MODEL")
-    agent_model: str = Field(default="opus", alias="AGENT_MODEL")
+    # whatever the host `claude` CLI defaults to. Pinned to explicit ids, not the
+    # `opus` alias: the alias tracks whatever family version the installed CLI
+    # ships, so an unrelated CLI upgrade silently changes the model under us (a
+    # stale 2.1.150 kept the brain on opus-4-7 long after 5 shipped).
+    brain_model: str = Field(default="claude-opus-5", alias="BRAIN_MODEL")
+    dev_model: str = Field(default="claude-opus-5", alias="DEV_MODEL")
+    agent_model: str = Field(default="claude-opus-5", alias="AGENT_MODEL")
     claude_runtime_dir: str = Field(
         default="/tmp/agentic-runtime", alias="CLAUDE_RUNTIME_DIR"
     )

@@ -66,7 +66,8 @@ def _footer(
     cost_usd: float | None = None,
 ) -> str:
     plural = "s" if tool_count != 1 else ""
-    base = f"_🛠️ {tool_count} tool{plural} · {elapsed_s:.1f}s"
+    tools = f"{tool_count} tool{plural} · " if tool_count > 0 else ""
+    base = f"_🛠️ {tools}{elapsed_s:.1f}s"
     if usage:
         in_tok = (
             usage.get("input_tokens", 0)
@@ -88,8 +89,6 @@ def _with_footer(
     usage: dict | None = None,
     cost_usd: float | None = None,
 ) -> str:
-    if tool_count <= 0:
-        return reply
     footer = _footer(tool_count, time.time() - t_start, usage=usage, cost_usd=cost_usd)
     return f"{reply}\n\n{footer}"
 
@@ -297,7 +296,7 @@ async def handle_message(
         add_message(thread_ts, "assistant", reply_text)
     return _with_footer(
         reply_text,
-        brain_result.tool_use_count + 1,
+        brain_result.tool_use_count,
         t_start,
         usage=brain_result.usage,
         cost_usd=brain_result.cost_usd,
