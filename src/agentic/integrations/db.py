@@ -114,6 +114,34 @@ _ENDPOINT = "/api/v1/admin/orders/debug/query"
 _BROWSER_UA = "Mozilla/5.0"
 
 
+# MySQL schema errors the debug API relays verbatim inside a 400. Raw
+# "Unknown column 'X'" reads as a dead end and the caller answers it by guessing
+# another name (observed: Platform → CreatedBy, both wrong, both one query each);
+# naming the introspection statement turns that into one deterministic step.
+_SCHEMA_ERR_RE = re.compile(r"Error (1054|1146) \(42S(?:22|02)\)")
+_SCHEMA_ERR_HINT = {
+    "1054": (
+        "That column does not exist on this table. Run `SHOW CREATE TABLE <table>` "
+        "and select from the real column list — do not retry with a guessed variant "
+        "(legacy columns usually carry a CD/ID suffix: PlatformCD, AdminUserID)."
+    ),
+    "1146": (
+        "That table does not exist in this schema. Run `SHOW TABLES LIKE '%keyword%'` "
+        "to find the real name — legacy tables are lowercase and run together "
+        "(`extraprice`), and ad-hoc `bak_*`/`*_tmp` tables exist in only one env."
+    ),
+}
+
+
+def _schema_error_hint(body: str, *, base_url_env: str) -> str:
+    """Actionable suffix for a relayed MySQL 1054/1146, else empty."""
+    m = _SCHEMA_ERR_RE.search(body or "")
+    if not m:
+        return ""
+    env = "db_query_prod (prod)" if "PROD" in base_url_env else "db_query (staging)"
+    return f" {_SCHEMA_ERR_HINT[m.group(1)]} Introspect with {env} — the env you just queried."
+
+
 def _map_http_error(status: int, body: str, *, base_url_env: str) -> ToolResult:
     """Translate the debug-API HTTP status into a user-facing ToolResult.
 
@@ -137,7 +165,9 @@ def _map_http_error(status: int, body: str, *, base_url_env: str) -> ToolResult:
         )
     if status == 400:
         return ToolResult.failure(
-            "VALIDATION", f"Debug query API rejected: {snippet or 'invalid query'}."
+            "VALIDATION",
+            f"Debug query API rejected: {snippet or 'invalid query'}."
+            + _schema_error_hint(body, base_url_env=base_url_env),
         )
     return ToolResult.failure(
         "SERVER", f"Debug query API {status}: {snippet}", retryable=status >= 500

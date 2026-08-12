@@ -46,7 +46,17 @@ _DB_TABLES_DOC = Path(__file__).resolve().parents[3] / "docs" / "DB_TABLES.md"
 _DB_SCHEMA_HINT = (
     f"Before your first query in a session, Read {_DB_TABLES_DOC} — legacy "
     "naming (table `orderrequest`, not `order_requests`), core tables, `*CD` "
-    "code lookup. "
+    "code lookup. Its column lists are the common ones, not the full set: for "
+    "any column it doesn't name, `SHOW CREATE TABLE <t>` first instead of "
+    "guessing a variant. "
+)
+
+# Staging and prod are separate schemas, not replicas — ad-hoc `bak_*`/`*_tmp`
+# tables and newer snake_case ones (`extra_prices`) live in one env only, so a
+# table confirmed on staging can 1146 on prod.
+_DB_PROD_SCHEMA_HINT = (
+    "Introspect with this tool, not db_query: a table or column confirmed on "
+    "staging may not exist in prod. "
 )
 
 # Curated map of the GoGoX KR backend (services, call graph, domain flows).
@@ -1137,7 +1147,7 @@ async def db_query(args: dict[str, Any]) -> dict[str, Any]:
         "Prefer db_query (staging) whenever the data exists on staging; only reach "
         "for prod to diagnose a live incident, verify prod-only records, or confirm "
         "a data fix. Filter tightly — never `SELECT *` on broad tables. "
-        + _DB_SCHEMA_HINT +
+        + _DB_SCHEMA_HINT + _DB_PROD_SCHEMA_HINT +
         "Allowed: SELECT / WITH / SHOW / DESCRIBE / EXPLAIN only; mutations, "
         "multi-statements and file access are rejected (client + server guard). "
         "A bare SELECT without LIMIT is capped automatically."
