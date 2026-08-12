@@ -261,7 +261,7 @@ async def test_pr_diff_caps_max_chars_above_the_ceiling(monkeypatch):
     monkeypatch.setattr(gh.httpx, "AsyncClient", lambda **k: _C())
     out = await gh.get_pr_diff(1, repo="gogovan/x", max_chars=80_000)
     assert len(out) < gh._MAX_DIFF_CHARS + 1000
-    assert "capped at 40000" in out
+    assert f"capped at {gh._MAX_DIFF_CHARS}" in out
     assert "Raising max_chars will not return more" in out
 
 

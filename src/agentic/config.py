@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     brain_model: str = Field(default="claude-opus-5", alias="BRAIN_MODEL")
     dev_model: str = Field(default="claude-opus-5", alias="DEV_MODEL")
     agent_model: str = Field(default="claude-opus-5", alias="AGENT_MODEL")
+    # Reasoning depth for the brain. Unset previously meant "whatever the CLI
+    # defaults to" — undocumented and free to change under us on a CLI upgrade,
+    # same trap as the model alias above. Empty string opts back out to that
+    # default; valid levels are low|medium|high|xhigh|max.
+    brain_effort: str = Field(default="medium", alias="BRAIN_EFFORT")
     claude_runtime_dir: str = Field(
         default="/tmp/agentic-runtime", alias="CLAUDE_RUNTIME_DIR"
     )

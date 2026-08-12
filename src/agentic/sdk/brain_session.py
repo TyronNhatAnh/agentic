@@ -118,6 +118,8 @@ def make_brain_options_factory(
             # Default Opus for reasoning quality; tunable via BRAIN_MODEL if cost
             # matters more than depth on a given deployment.
             model=settings.brain_model,
+            # Pin reasoning depth explicitly (was unset → CLI default).
+            **({"effort": settings.brain_effort} if settings.brain_effort else {}),
             # Token-level StreamEvents → the placeholder types the reply out live.
             # Without this the stream only ticks per finished AssistantMessage, so a
             # tool-heavy turn shows nothing but the tool/heartbeat line until the end.
