@@ -164,6 +164,24 @@ def test_build_subagents_review_has_read_and_mcp_pr_tools():
     assert ad.permissionMode is None  # read-only, no edits
 
 
+def test_review_can_size_a_finding_against_real_data():
+    """Read-only data tools, so a finding whose severity depends on how often a
+    shape occurs is measurable instead of hedged."""
+    tools = build_subagents()["review"].tools
+    for name in ("db_query", "db_query_prod", "grafana_search_logs"):
+        assert f"mcp__agentic__{name}" in tools
+
+
+def test_review_stays_read_only_and_never_blocks_on_a_confirm():
+    """No shell (report, don't mutate), and nothing that would park a mid-review
+    tool call on a Slack button until the 5' auto-deny."""
+    from agentic.sdk.permission import CONFIRM_TOOLS
+
+    tools = build_subagents()["review"].tools
+    assert not any(t == "Bash" or t.startswith("Bash(") for t in tools)
+    assert not {t.rsplit("__", 1)[-1] for t in tools} & CONFIRM_TOOLS
+
+
 def test_build_subagents_dev_locked_down():
     ad = build_subagents()["dev"]
     assert ad.tools == DEV_ALLOWED_TOOLS
