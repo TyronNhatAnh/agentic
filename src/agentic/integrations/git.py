@@ -36,6 +36,11 @@ async def _run_git(*args: str, cwd: str | None = None,
     return proc.returncode or 0, out.decode().strip(), err.decode().strip()
 
 
+_EMBEDDED_CRED_RE = re.compile(
+    r"^https://[^/@:]+(?::[^/@]*)?@github\.com/(?P<path>.+)$"
+)
+
+
 async def _authed_remote_url(repo_path: str) -> tuple[str, dict[str, str]]:
     """Return (remote_url, env_overrides) for authenticated remote operations.
 
@@ -54,6 +59,13 @@ async def _authed_remote_url(repo_path: str) -> tuple[str, dict[str, str]]:
         https_url = f"https://x-access-token:{token}@github.com/{path_part}"
     elif remote_url.startswith("https://github.com/"):
         https_url = remote_url.replace("https://github.com/", f"https://x-access-token:{token}@github.com/", 1)
+    elif (m := _EMBEDDED_CRED_RE.match(remote_url)):
+        # A clone whose origin already has credentials baked into the URL
+        # (`https://<user>:<token>@github.com/...`). Matched neither branch above,
+        # so the whole repo fell back to unauthenticated "origin" and every fetch
+        # failed. Use our own token and ignore the embedded one — it is whatever
+        # was valid when someone cloned, and may well be revoked.
+        https_url = f"https://x-access-token:{token}@github.com/{m.group('path')}"
     else:
         return "origin", {}
     # GIT_CONFIG_GLOBAL=/dev/null prevents git from loading ~/.gitconfig, which
