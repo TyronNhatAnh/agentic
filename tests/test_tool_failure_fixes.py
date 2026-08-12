@@ -45,6 +45,19 @@ def test_brain_prompt_carries_no_dead_doc_path():
     assert not missing, f"prompt points at nonexistent docs: {missing}"
 
 
+def test_tool_descriptions_carry_no_relative_doc_path():
+    """Tool descriptions ship in every request's schema and told the brain to Read
+    `docs/arch/...` — same dead relative path as the prompts, different surface."""
+    import re
+
+    from agentic.sdk.mcp_tools import _ALL_TOOLS
+
+    for t in _ALL_TOOLS:
+        assert not re.search(r"(?<![\w/])docs/", t.description or ""), (
+            f"{t.name} description points at a relative docs path"
+        )
+
+
 # --- 2x Loki TIMEOUT on now-24h / now-7d ------------------------------------
 
 def test_clamp_span_leaves_short_window_untouched():
@@ -75,6 +88,36 @@ def test_clamp_span_tolerates_the_drift_between_two_now_reads():
     end = 1_000_000 * _H
     _, _, note = _clamp_span(str(end - _MAX_SPAN_NS - 3_000_000), str(end))
     assert note == ""
+
+
+async def test_search_logs_reports_the_window_it_actually_queried(monkeypatch):
+    """The clamp is invisible unless the result says so: the header used to echo
+    `now-24h` while only the newest 2h was queried, and the zero-result advice
+    told the brain to widen — which replays the same slice."""
+    from agentic.integrations import grafana as gf
+
+    monkeypatch.setattr(gf, "_env_conf", lambda env: ("https://g", "loki", "prod"))
+    monkeypatch.setattr(gf, "_basic_auth", lambda: None)
+    seen: dict = {}
+
+    class _R:
+        status_code = 200
+        headers: dict = {}
+        def raise_for_status(self): pass
+        def json(self): return {"data": {"resultType": "streams", "result": []}}
+
+    class _C:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, headers=None, params=None, auth=None):
+            seen.update(params)
+            return _R()
+
+    monkeypatch.setattr(gf.httpx, "AsyncClient", lambda **k: _C())
+    r = await gf.search_logs(query='{app="x"}', env="prod", since="now-24h")
+    assert int(seen["end"]) - int(seen["start"]) == _MAX_SPAN_NS
+    assert "now-24h" not in r.data, "reported a window it never queried"
+    assert "back another 2h" in r.data
 
 
 def test_clamp_span_still_clamps_past_the_slack():

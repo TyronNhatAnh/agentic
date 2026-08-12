@@ -63,13 +63,17 @@ _DB_PROD_SCHEMA_HINT = (
 # Curated map of the GoGoX KR backend (services, call graph, domain flows).
 # Referenced from github_get_pr_diff so a reviewer Reads it before judging
 # cross-service correctness instead of reviewing a diff in a vacuum.
-_ARCH_DOC = Path(__file__).resolve().parents[3] / "docs" / "GOGOX_ARCHITECTURE.md"
+_DOCS_DIR = Path(__file__).resolve().parents[3] / "docs"
+_ARCH_DOC = _DOCS_DIR / "GOGOX_ARCHITECTURE.md"
+# Absolute, like the prompts: the brain's cwd is the thread's service repo, so a
+# relative `docs/…` here resolves nowhere and the Read just fails.
 _ARCH_HINT = (
     f" Before reviewing a GoGoX service PR, Read {_ARCH_DOC} — a small INDEX with "
     "the topology, call graph and naming traps ('DaService', report-service). Then "
-    "Read docs/arch/features.md (next to the index) to find which feature the change "
-    "touches and its FULL set of services, and Read docs/arch/<service>.md for each of "
-    "those — the repo the PR sits in is rarely the whole story. Don't load every service."
+    f"Read {_DOCS_DIR}/arch/features.md to find which feature the change "
+    f"touches and its FULL set of services, and Read {_DOCS_DIR}/arch/<service>.md for "
+    "each of those — the repo the PR sits in is rarely the whole story. "
+    "Don't load every service."
 )
 
 # Match dispatcher.py:103-104 legacy semantics — read-only verbs retry up to
