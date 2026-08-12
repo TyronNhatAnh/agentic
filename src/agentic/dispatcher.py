@@ -13,6 +13,7 @@ import logging
 import re
 import time
 
+from . import __version__
 from .config import settings
 from .integrations import git as git_int
 from .sdk import (
@@ -78,7 +79,7 @@ def _footer(
         base += f" · {in_tok // 1000}k/{out_tok // 1000}k tok"
     if cost_usd:
         base += f" · ${cost_usd:.3f}"
-    return base + "_"
+    return f"{base} · v{__version__}_"
 
 
 def _with_footer(

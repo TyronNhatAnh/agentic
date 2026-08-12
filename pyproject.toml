@@ -1,6 +1,6 @@
 [project]
 name = "agentic"
-version = "0.1.0"
+version = "1.0.0"
 description = "Slack bot multi-agent orchestrator powered by Claude CLI"
 requires-python = ">=3.11"
 dependencies = [
