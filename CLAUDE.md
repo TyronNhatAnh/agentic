@@ -32,7 +32,7 @@ Required env (see [.env.example](.env.example)): `SLACK_BOT_TOKEN` (xoxb-), `SLA
    - returns the final reply text + a `🛠️ N tool · Xs · tok · $cost` footer.
 4. The worker edits the placeholder in place with the returned reply (final flush), chunking long messages.
 
-The streamed partial text **is** the progress indicator — there is no separate progress-message loop (it would fight the stream for the same `chat.update` target). The `Job` carries no `progress` callback.
+The streamed partial text **is** the progress indicator — there is no separate progress *message*, and the `Job` carries no `progress` callback. Two writers share that one placeholder: the stream loop, and a `_heartbeat` task that appends an elapsed-time line when the model stalls before emitting anything (a turn once sat 344s before the first token, leaving the placeholder frozen). Both go through `_Progress`, which owns the edit slot — a lock so they can't interleave `chat.update` on the same message, plus the shared debounce/429 backoff. Any new writer must go through it too, not straight to `chat.update`.
 
 The brain emits native `tool_use` blocks; the SDK validates input against each `@tool`'s typed schema and runs it. There is **no** JSON-from-stdout parsing and no Python ReAct loop — the SDK orchestrates tool calls and sub-agent delegation.
 
