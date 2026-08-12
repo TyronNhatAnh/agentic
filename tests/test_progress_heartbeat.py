@@ -27,7 +27,22 @@ async def test_heartbeat_edits_placeholder_while_stream_is_silent():
     await hb
 
     assert len(slack.updates) == 1
-    assert "waiting for the model… 2m05s" in slack.updates[0]
+    assert "still working… 2m05s" in slack.updates[0]
+
+
+async def test_heartbeat_edit_carries_exactly_one_status_line():
+    """The heartbeat used to append its own ⏳ line *and* still get the stream
+    suffix, so a stalled turn rendered two hourglasses stacked."""
+    slack = FakeSlack()
+    progress = bs._Progress(slack, "C1", "1.0", time.monotonic() - 81)
+    await progress.render("Half an answer.")
+    progress._last_edit = time.monotonic() - 100  # go stale
+    await progress.render_heartbeat()
+
+    hb = slack.updates[-1]
+    assert hb.startswith("Half an answer.")  # partial reply survives
+    assert hb.count("⏳") == 1
+    assert "still working… 1m21s" in hb
 
 
 async def test_heartbeat_backs_off_when_stream_just_rendered():
@@ -36,7 +51,11 @@ async def test_heartbeat_backs_off_when_stream_just_rendered():
     await progress.render("partial answer")
     await progress.render_heartbeat()  # inside the stale window → skipped
 
-    assert slack.updates == ["partial answer" + bs._STREAM_SUFFIX]
+    assert len(slack.updates) == 1
+    assert slack.updates[0].startswith("partial answer")
+    # One status line only — the stream's, not the heartbeat's (it was skipped).
+    assert "processing…" in slack.updates[0]
+    assert "still working" not in slack.updates[0]
 
 
 async def test_busy_reply_reports_elapsed():

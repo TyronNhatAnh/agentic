@@ -42,17 +42,22 @@ log = logging.getLogger(__name__)
 
 # Slack chat.update is ~1/s/channel — 1.5s leaves headroom for long tails.
 _STREAM_EDIT_INTERVAL_S = 1.5
-# Appended to every *streaming* edit so a partial reply that sits still (brain is
-# mid-tool-call / still thinking) doesn't read as the finished answer. The worker
-# renders the final reply via a separate path (job.reply), so it never carries
-# this marker — its disappearance is the "done" signal. Added inside
-# _safe_placeholder_update (the only streaming-edit site) after truncation so it's
-# never clipped, and adds no extra chat.update calls (§8 2026-05-30 rate-limit guard).
-_STREAM_SUFFIX = "\n\n_⏳ processing…_"
+# Every in-flight edit ends in exactly one status line, so a partial reply that
+# sits still (brain is mid-tool-call / still thinking) doesn't read as the
+# finished answer. The worker renders the final reply via a separate path
+# (job.reply), so it never carries one — its disappearance is the "done" signal.
+# Appended inside _safe_placeholder_update after truncation so it's never clipped,
+# and adds no extra chat.update calls (§8 2026-05-30 rate-limit guard).
+# Two writers, two wordings, one line: the stream says `processing`, the heartbeat
+# `still working`. Before they were stacked (heartbeat wrote its own line *and*
+# got the suffix), which rendered two hourglasses at once.
+_STREAM_SUFFIX_FMT = "\n\n_⏳ processing… {}_"
+_HEARTBEAT_SUFFIX_FMT = "\n\n_⏳ still working… {}_"
 # The stream only edits the placeholder when the SDK emits a message. A stalled
 # API call emits nothing (2026-08-07: one turn sat 344s between query and first
 # token), leaving the placeholder frozen on the initial text — indistinguishable
-# from a dead bot. The heartbeat edits in that gap with the elapsed time.
+# from a dead bot. The heartbeat re-pushes the same view in that gap; only the
+# elapsed time changes, so the reply text is never disturbed.
 _HEARTBEAT_INTERVAL_S = 20
 
 
@@ -493,20 +498,21 @@ class _Progress:
                 await self._flush
 
     async def render_heartbeat(self) -> None:
-        """Elapsed-time edit, only when the placeholder has gone stale. Keeps
-        `_last_rendered` untouched so the stream's dedupe still compares against
-        real content, not the heartbeat line."""
+        """Refresh the elapsed time, only when the placeholder has gone stale.
+        Re-pushes the current view unchanged — the differing status suffix is the
+        whole edit. Keeps `_last_rendered` untouched so the stream's dedupe still
+        compares against real content."""
         async with self._lock:
             now = time.monotonic()
             if now - self._last_edit < _HEARTBEAT_INTERVAL_S:
                 return
-            waiting = f"⏳ waiting for the model… {_fmt_elapsed(now - self._t_start)}"
-            base = self._last_rendered
-            await self._push(f"{base}\n\n{waiting}" if base else waiting, now)
+            await self._push(self._last_rendered, now, heartbeat=True)
 
-    async def _push(self, view: str, now: float) -> None:
+    async def _push(self, view: str, now: float, *, heartbeat: bool = False) -> None:
         cooldown = await _safe_placeholder_update(
-            self._client, self._channel, self._ts, view
+            self._client, self._channel, self._ts, view,
+            elapsed_s=now - self._t_start,
+            suffix_fmt=_HEARTBEAT_SUFFIX_FMT if heartbeat else _STREAM_SUFFIX_FMT,
         )
         # On a Slack 429 push the next allowed edit out by Retry-After so we stop
         # hammering chat.update.
@@ -527,7 +533,8 @@ async def _heartbeat(progress: _Progress, stop: asyncio.Event) -> None:
 
 
 async def _safe_placeholder_update(
-    client: Any, channel: str, ts: str, text: str
+    client: Any, channel: str, ts: str, text: str,
+    *, elapsed_s: float, suffix_fmt: str,
 ) -> float:
     """Best-effort streaming edit. Returns extra seconds to wait before the next
     edit — non-zero only when Slack rate-limited us (chat.update is ~1/s/channel,
@@ -535,13 +542,17 @@ async def _safe_placeholder_update(
     the same placeholder, so dropping an intermediate edit here is safe."""
     if not (channel and ts):
         return 0.0
+    suffix = suffix_fmt.format(_fmt_elapsed(elapsed_s))
     snippet = text.strip()
     if not snippet:
-        return 0.0
-    # Block Kit markdown blocks cap at 12,000 chars; leave headroom for suffix.
-    if len(snippet) > 11500:
-        snippet = snippet[:11400] + "\n…"
-    snippet += _STREAM_SUFFIX
+        # No prose yet (the heartbeat fires before the first token too) — the
+        # status line is the whole message, so drop its leading blank line.
+        snippet = suffix.lstrip("\n")
+    else:
+        # Block Kit markdown blocks cap at 12,000 chars; leave headroom for suffix.
+        if len(snippet) > 11500:
+            snippet = snippet[:11400] + "\n…"
+        snippet += suffix
     try:
         # Render via a Block Kit markdown block so the streamed partial shows
         # formatted (headings/lists/tables) instead of raw markdown; Slack

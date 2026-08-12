@@ -148,7 +148,7 @@ async def test_silent_stall_shows_elapsed_and_keeps_ticking():
     result, _ = await _run([(0.35, None), (0, _result("done"))], slack, "T_stall")
 
     assert result.reply == "done"
-    waits = [u for u in slack.updates if "waiting for the model" in u]
+    waits = [u for u in slack.updates if "still working" in u]
     assert len(waits) >= 3, slack.updates  # ~0.35s / 0.05s tick
 
 
@@ -156,7 +156,7 @@ async def test_no_heartbeat_when_the_turn_is_fast():
     slack = FakeSlack()
     await _run([(0, _result("quick"))], slack, "T_fast")
 
-    assert not any("waiting for the model" in u for u in slack.updates)
+    assert not any("still working" in u for u in slack.updates)
 
 
 async def test_heartbeat_stops_after_the_turn_returns():
@@ -209,7 +209,7 @@ async def test_stall_after_partial_prose_keeps_the_text_and_adds_elapsed():
     ]
     await _run(script, slack, "T_midstall")
 
-    stalled = [u for u in slack.updates if "waiting for the model" in u]
+    stalled = [u for u in slack.updates if "still working" in u]
     assert stalled, slack.updates
     # The partial answer must survive the heartbeat edit, not be replaced by it.
     assert all(u.startswith("Half an answer.") for u in stalled)
@@ -304,7 +304,7 @@ async def test_timeout_during_a_stall_releases_the_client(monkeypatch):
     assert result.error and "timed out" in result.error
     assert pool.released == ["T_timeout"]
     # The user still saw progress instead of a frozen placeholder.
-    assert any("waiting for the model" in u for u in slack.updates)
+    assert any("still working" in u for u in slack.updates)
 
 
 async def test_heartbeat_survives_a_failing_slack_edit():
