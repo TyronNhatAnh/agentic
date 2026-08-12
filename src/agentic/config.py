@@ -10,18 +10,13 @@ class Settings(BaseSettings):
 
     claude_bin: str = Field(default="claude", alias="CLAUDE_BIN")
     claude_timeout: int = Field(default=300, alias="CLAUDE_TIMEOUT")
-    # Models pinned per role so behavior is deterministic instead of inheriting
-    # whatever the host `claude` CLI defaults to. Pinned to explicit ids, not the
-    # `opus` alias: the alias tracks whatever family version the installed CLI
-    # ships, so an unrelated CLI upgrade silently changes the model under us (a
-    # stale 2.1.150 kept the brain on opus-4-7 long after 5 shipped).
+    # Explicit ids, not the `opus` alias: the alias tracks the installed CLI's
+    # family version, so a CLI upgrade would swap the model under us.
     brain_model: str = Field(default="claude-opus-5", alias="BRAIN_MODEL")
     dev_model: str = Field(default="claude-opus-5", alias="DEV_MODEL")
     agent_model: str = Field(default="claude-opus-5", alias="AGENT_MODEL")
-    # Reasoning depth for the brain. Unset previously meant "whatever the CLI
-    # defaults to" — undocumented and free to change under us on a CLI upgrade,
-    # same trap as the model alias above. Empty string opts back out to that
-    # default; valid levels are low|medium|high|xhigh|max.
+    # low|medium|high|xhigh|max; empty = the CLI's own default, which is
+    # undocumented and shifts on upgrade (same trap as the model alias above).
     brain_effort: str = Field(default="medium", alias="BRAIN_EFFORT")
     claude_runtime_dir: str = Field(
         default="/tmp/agentic-runtime", alias="CLAUDE_RUNTIME_DIR"
@@ -61,26 +56,18 @@ class Settings(BaseSettings):
     notion_parent_page_id: str = Field(default="", alias="NOTION_PAGE_ID")
     notion_version: str = Field(default="2022-06-28", alias="NOTION_VERSION")
 
-    # Read-only DB introspection (the db_query tool) goes through ggx-kr-order-service's
-    # debug-query admin API (POST /api/v1/admin/orders/debug/query) — a TEMPORARY,
-    # staging-only inspector that runs one read-only statement against the read
-    # replica. It replaced the direct MariaDB connection, which the bot host couldn't
-    # reach (staging DB sits behind VPN). The endpoint only exists when that service's
-    # APP_ENV != prod (prod → 403/404), so it can't hit production. Empty base URL or
-    # token disables db_query (it returns a CONFIG error instead of failing).
+    # db_query goes through ggx-kr-order-service's debug-query admin API (the bot
+    # host can't reach the staging DB directly — VPN). That endpoint only exists
+    # when APP_ENV != prod, so this pair can't hit production. Empty = tool off.
     order_debug_base_url: str = Field(default="", alias="ORDER_DEBUG_BASE_URL")
     order_debug_admin_token: str = Field(default="", alias="ORDER_DEBUG_ADMIN_TOKEN")
-    # PRODUCTION variant (the db_query_prod tool). Same debug endpoint, but the prod
-    # host + a genuine prod AdminUser token, backed by a physical read replica
-    # (@@read_only=1). Runs inline (no Slack confirm) — reads real customer PII, so
-    # the audit log is the control. Empty base URL or token = db_query_prod off.
+    # db_query_prod: same endpoint on the prod host, backed by a @@read_only=1
+    # replica. Runs inline — the server-side audit log is the control, not a button.
     order_debug_prod_base_url: str = Field(default="", alias="ORDER_DEBUG_PROD_BASE_URL")
     order_debug_prod_admin_token: str = Field(default="", alias="ORDER_DEBUG_PROD_ADMIN_TOKEN")
-    # Auto-login fallback: when ORDER_DEBUG_PROD_ADMIN_TOKEN is empty, the prod path
-    # obtains a token itself by POSTing the admin manual-login form (email + pwd →
-    # Set-Cookie access_token), caches it in-process, and re-logins on 401/403. The
-    # login host must match the DB env's gateway (a staging-issued token won't auth
-    # a prod query). A static ORDER_DEBUG_PROD_ADMIN_TOKEN always wins over login.
+    # Auto-login fallback when ORDER_DEBUG_PROD_ADMIN_TOKEN is empty: POST the admin
+    # manual-login form for a cookie token, cached in-process, re-issued on 401/403.
+    # The login host must match the DB env's gateway — a staging token won't auth prod.
     order_debug_prod_login_url: str = Field(default="", alias="ORDER_DEBUG_PROD_BASE_URL_LOGIN")
     order_debug_prod_email: str = Field(default="", alias="ORDER_DEBUG_PROD_BASE_EMAIL")
     order_debug_prod_pass: str = Field(default="", alias="ORDER_DEBUG_PROD_BASE_PASS")
@@ -117,27 +104,18 @@ class Settings(BaseSettings):
         default=12000, alias="BRAIN_HISTORY_MSG_CAP_CHARS"
     )
 
-    # Per-turn circuit breakers (production best practice: a runaway loop or a
-    # hung SDK subprocess must not pin a worker or burn unbounded cost).
-    #  - brain_timeout_s: wall-clock deadline on one brain turn. On expiry the
-    #    pooled client is discarded (its receive stream is half-consumed and unsafe
-    #    to reuse) and the next turn opens a fresh session via the resume token.
-    #  - brain_max_turns / brain_max_budget_usd: SDK-native caps, both shipped 0
-    #    (= off) because they cut deep investigations mid-answer — so nothing
-    #    bounds the cost of a fast expensive turn, only a stalled one. When
-    #    enabled: max_turns is best-effort and max_budget_usd is checked between
-    #    turns, so one pathological turn can still overshoot.
+    # Per-turn circuit breakers. brain_timeout_s is a wall-clock deadline (on expiry
+    # the pooled client is discarded — half-consumed stream). The two SDK-native caps
+    # ship 0 = off: they cut deep investigations mid-answer, so today only a *stalled*
+    # turn is bounded, not an expensive one. Both are best-effort/between-turns anyway.
     brain_timeout_s: int = Field(default=1200, alias="BRAIN_TIMEOUT_S")
     brain_max_turns: int = Field(default=0, alias="BRAIN_MAX_TURNS")
     brain_max_budget_usd: float = Field(default=0.0, alias="BRAIN_MAX_BUDGET_USD")
 
     slack_allowed_channels: str = Field(default="", alias="SLACK_ALLOWED_CHANNELS")
 
-    # --- Hourly server-health monitor ([monitor.py]). A single background task
-    # counts ERROR-level Loki lines per registered service + pings health URLs,
-    # then posts a digest to MONITOR_CHANNEL. Disabled until MONITOR_ENABLED=true
-    # AND MONITOR_CHANNEL is set (else start_monitor no-ops with a warning, so a
-    # restart never breaks). Posts only when notable unless MONITOR_ALWAYS_POST.
+    # Hourly server-health monitor (monitor.py). Needs BOTH enabled=true and a
+    # channel, else start_monitor no-ops with a warning rather than breaking startup.
     monitor_enabled: bool = Field(default=False, alias="MONITOR_ENABLED")
     monitor_channel: str = Field(default="", alias="MONITOR_CHANNEL")
     monitor_interval_s: int = Field(default=3600, alias="MONITOR_INTERVAL_S")

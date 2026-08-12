@@ -151,6 +151,10 @@ _RUNS_ADDED_COLUMNS = {
     "output_tokens": "INTEGER",
     "cost_usd": "REAL",
     "num_turns": "INTEGER",
+    # Splits a slow turn into model time vs waiting: duration_ms − duration_api_ms
+    # is dead time, and ttft_ms says whether it sat before the first token.
+    "duration_api_ms": "INTEGER",
+    "ttft_ms": "INTEGER",
 }
 
 
@@ -242,6 +246,8 @@ def log_run(
     usage: dict | None = None,
     cost_usd: float | None = None,
     num_turns: int | None = None,
+    duration_api_ms: int | None = None,
+    ttft_ms: int | None = None,
 ) -> int:
     # Observability columns (§12.K) — only the brain summary row passes usage;
     # tool rows leave them null. Token counts are derived from usage so callers
@@ -253,8 +259,9 @@ def log_run(
             INSERT INTO runs(created_at, thread_ts, channel, user_id, agent,
                              input, output, status, duration_ms, error,
                              cache_read_input_tokens, cache_creation_input_tokens,
-                             input_tokens, output_tokens, cost_usd, num_turns)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             input_tokens, output_tokens, cost_usd, num_turns,
+                             duration_api_ms, ttft_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 time.time(),
@@ -273,6 +280,8 @@ def log_run(
                 u.get("output_tokens"),
                 cost_usd,
                 num_turns,
+                duration_api_ms,
+                ttft_ms,
             ),
         )
         return cur.lastrowid

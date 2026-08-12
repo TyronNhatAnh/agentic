@@ -282,6 +282,8 @@ async def handle_message(
         usage=brain_result.usage,
         cost_usd=brain_result.cost_usd,
         num_turns=brain_result.num_turns,
+        duration_api_ms=brain_result.duration_api_ms,
+        ttft_ms=brain_result.ttft_ms,
     )
 
     reply_text = brain_result.reply or "(no output)"

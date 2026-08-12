@@ -56,12 +56,8 @@ REVIEW_ALLOWED_TOOLS: list[str] = [
     # only see the (possibly truncated) diff text and would approve on that.
     # Read-only: prepares a worktree, no commit/push.
     "mcp__agentic__git_prepare_pr_review_workspace",
-    # Measure instead of guess. A finding whose severity turns on how often a shape
-    # occurs in real data (2026-08-12: "AppointmentAt is nullable so the new rule
-    # fails open" — minor or a hole, depending entirely on the prod row count) was
-    # unanswerable here: the agent had no way to look, so it shipped the hedge.
-    # All three are read-only and none is in CONFIRM_TOOLS, so no button blocks a
-    # review mid-flight.
+    # Lets review size a finding against real data instead of hedging. Read-only,
+    # and none is in CONFIRM_TOOLS — a button mid-review would stall it to timeout.
     "mcp__agentic__db_query",
     "mcp__agentic__db_query_prod",
     "mcp__agentic__grafana_search_logs",

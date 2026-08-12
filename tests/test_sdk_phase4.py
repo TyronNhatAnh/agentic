@@ -163,6 +163,66 @@ def test_log_run_persists_usage_columns():
     assert row["num_turns"] == 2
 
 
+def test_log_run_persists_latency_split():
+    """Wall-clock minus API time is dead time; ttft says which side of the first
+    token it sat on."""
+    log_run(
+        agent="brain", input_text="ping", output="pong", status="ok",
+        duration_ms=638_000, thread_ts="t1", channel="C1",
+        duration_api_ms=430_000, ttft_ms=192_000,
+    )
+    row = _rows()[0]
+    assert row["duration_api_ms"] == 430_000
+    assert row["ttft_ms"] == 192_000
+
+
+def test_log_run_leaves_latency_null_for_tool_rows():
+    log_run(agent="Bash", input_text="ls", output="", status="ok",
+            duration_ms=5, thread_ts="t1", channel="C1")
+    row = _rows()[0]
+    assert row["duration_api_ms"] is None
+    assert row["ttft_ms"] is None
+
+
+def _result_msg(usage, model_usage):
+    from claude_agent_sdk import ResultMessage
+
+    return ResultMessage(
+        subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+        num_turns=3, session_id="s1", usage=usage, model_usage=model_usage,
+    )
+
+
+def test_turn_usage_counts_sub_agent_tokens():
+    """`usage` is main-agent only; a delegated turn bills the sub-agent's tokens
+    through total_cost_usd, so the columns must come from `model_usage`."""
+    from agentic.sdk.brain_session import _turn_usage
+
+    main = {"input_tokens": 4, "output_tokens": 2709,
+            "cache_read_input_tokens": 73331, "cache_creation_input_tokens": 6499}
+    got = _turn_usage(_result_msg(main, {
+        "claude-opus-5": {"inputTokens": 4, "outputTokens": 2709,
+                          "cacheReadInputTokens": 73331, "cacheCreationInputTokens": 6499},
+        # The review sub-agent — invisible in `usage`, ~90% of the real spend.
+        "claude-opus-5-subagent": {"inputTokens": 120, "outputTokens": 18000,
+                                   "cacheReadInputTokens": 2000000,
+                                   "cacheCreationInputTokens": 40000},
+    }))
+    assert got["output_tokens"] == 20709
+    assert got["cache_read_input_tokens"] == 2073331
+    assert got["cache_creation_input_tokens"] == 46499
+    assert got["input_tokens"] == 124
+
+
+def test_turn_usage_falls_back_when_the_cli_sends_no_model_usage():
+    from agentic.sdk.brain_session import _turn_usage
+
+    main = {"output_tokens": 7, "cache_read_input_tokens": 11}
+    assert _turn_usage(_result_msg(main, None)) == main
+    assert _turn_usage(_result_msg(main, {})) == main
+    assert _turn_usage(None) == {}
+
+
 async def test_pre_tool_denies_raw_net_git_in_bash():
     hooks = build_brain_hooks(thread_ts="t1", channel="C1")
     pre = hooks["PreToolUse"][0].hooks[0]

@@ -176,17 +176,13 @@ def _format_streams(
             except (ValueError, TypeError):
                 continue
     if not entries:
-        # Absence-of-evidence trap: a bare "no logs" reads as "no error exists",
-        # so the brain stops and clarifies instead of widening. Echo the exact window
-        # scanned (the tool's silent `now-1h` default is otherwise invisible to the
-        # model) and name the next moves — mirror the capped-path's self-describing tone.
-        # A clamped window can't be widened — telling the brain to try `now-24h`
-        # there just replays the same 2h slice.
+        # A bare "no logs" reads to the brain as "no error exists", so spell out the
+        # window actually scanned (the silent `now-1h` default is invisible to it)
+        # and the next move. Never suggest a wider span than the cap — it just gets
+        # clamped back and replays the same slice.
         widen = (
             "move `since`/`until` back another 2h (the span is capped, widening is a no-op)"
             if clamped
-            # Not `now-24h`: that gets clamped straight back to 2h, so the advice
-            # would send the brain into the cap instead of past it.
             else "widen `since` up to the 2h cap (e.g. `now-2h`), then move the window back"
         )
         return (
@@ -199,12 +195,9 @@ def _format_streams(
 
     entries.sort(key=lambda e: e[0], reverse=True)  # newest first
     shown = entries[:limit]
-    # Loki receives `limit` (see search_logs) and returns at most that many rows, so
-    # len(entries) == limit signals the result was clamped — there were almost certainly
-    # more matches outside the returned slice. With direction=backward those rows are the
-    # NEWEST, so the slice covers only the tail of [since, until]; the rest was never seen.
-    # Surface both facts: a silent count ("200 lines") reads as "scanned everything" and
-    # makes the brain mark the unscanned span UNKNOWN or guess at time-chunking.
+    # len(entries) == limit means Loki clamped; direction=backward makes those the
+    # NEWEST rows, so only the tail of the window was seen. Both facts go in the
+    # header — a silent "200 lines" reads as "scanned everything".
     covered = f"{_fmt_ts(shown[-1][0])}→{_fmt_ts(shown[0][0])} UTC"
     capped = len(entries) >= limit
     head = (
@@ -370,22 +363,11 @@ async def list_datasources(env: str = "stag") -> ToolResult:
     return ToolResult.success("\n".join(lines))
 
 
-# LogQL line filter the health monitor counts with. It matches *real incidents* —
-# HTTP 5xx (the server failed) plus hard crashes (fatal/panic) — NOT every line
-# containing "error". Two earlier filters were wrong:
-#   1. `|~ "(?i)error|..."` counted JSON bodies with `"errors":null`, field names,
-#      etc. → inflated prod counts ~100-5000x (driver-service: 14.7k / 3 real).
-#   2. anchoring to log *level* (level=error) both over- and under-counts: it floods
-#      on benign client-fault logs (da-api `Nil JSON web token`, user-service
-#      `sql: no rows` → all 400s) yet MISSES real 5xx, because request loggers emit
-#      the 5xx line at INFO level (verified prod: order 26 real 5xx but 4 level=error;
-#      da-api logs `Completed 500` at INFO). Loki here does not populate detected_level.
-# 5xx is the format-agnostic "we broke" signal across the three prod log shapes:
-#   Go/JSON  "status":500           — driver/order/user request logger
-#   Ruby     Completed 500 ...      — da-api (Rails), logged at INFO
-#   crash    "level":"fatal"/"panic" (Go) · `FATAL --`/`PANIC ...---` (Ruby/Spring)
-# Verified on prod 2026-06-23: da-api → 10 (all `Completed 500`), user 56→0 (all 400),
-# order 26 real 5xx now counted. 4xx client faults are intentionally excluded.
+# What the health monitor counts as a real incident: HTTP 5xx + hard crashes, one
+# regex per prod log shape (Go JSON · Rails `Completed 500` · fatal/panic).
+# Deliberately not level-based: request loggers emit 5xx at INFO and Loki here has
+# no detected_level, so level=error both misses those and floods on 400s. Matching
+# the word "error" is worse still — `"errors":null` bodies inflated counts ~1000x.
 _ERROR_FILTER = (
     '|~ `"status":5[0-9][0-9]'
     '|Completed 5[0-9][0-9]'

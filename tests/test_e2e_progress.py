@@ -233,6 +233,27 @@ async def test_token_deltas_type_the_answer_out_live():
     assert any(u.startswith("Hello wor") for u in prose)
 
 
+async def test_latency_split_separates_the_wait_from_the_work():
+    """A 638s turn that spent 192s before its first token looked identical to one
+    that generated for 638s — ttft_ms is what tells them apart."""
+    slack = FakeSlack()
+    result, _ = await _run(
+        [(0.15, _delta("Hi")), (0, _result("Hi"))], slack, "T_ttft"
+    )
+
+    assert result.ttft_ms >= 150  # the stall before the first token, not after
+    assert result.duration_api_ms == 1100  # straight off ResultMessage
+
+
+async def test_latency_split_survives_a_turn_with_no_partials():
+    slack = FakeSlack()
+    result, _ = await _run(
+        [(0.1, _assistant(TextBlock("done"))), (0, _result("done"))], slack, "T_ttft2"
+    )
+
+    assert result.ttft_ms >= 100
+
+
 async def test_debounced_tokens_still_land_when_the_stream_pauses(monkeypatch):
     """The debounce must hold the newest view, not drop it. Real repro: the model
     types "I'll check." then goes off to run a tool for 2s — every token after the

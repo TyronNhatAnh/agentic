@@ -42,22 +42,14 @@ log = logging.getLogger(__name__)
 
 # Slack chat.update is ~1/s/channel — 1.5s leaves headroom for long tails.
 _STREAM_EDIT_INTERVAL_S = 1.5
-# Every in-flight edit ends in exactly one status line, so a partial reply that
-# sits still (brain is mid-tool-call / still thinking) doesn't read as the
-# finished answer. The worker renders the final reply via a separate path
-# (job.reply), so it never carries one — its disappearance is the "done" signal.
-# Appended inside _safe_placeholder_update after truncation so it's never clipped,
-# and adds no extra chat.update calls (§8 2026-05-30 rate-limit guard).
-# Two writers, two wordings, one line: the stream says `processing`, the heartbeat
-# `still working`. Before they were stacked (heartbeat wrote its own line *and*
-# got the suffix), which rendered two hourglasses at once.
+# Exactly one status line per in-flight edit, so a frozen partial doesn't read as
+# the finished answer (the worker's final reply carries none — that's the "done"
+# signal). Applied in _safe_placeholder_update after truncation so it's never
+# clipped. One line per writer, never both: they used to stack into two hourglasses.
 _STREAM_SUFFIX_FMT = "\n\n_⏳ processing… {}_"
 _HEARTBEAT_SUFFIX_FMT = "\n\n_⏳ still working… {}_"
-# The stream only edits the placeholder when the SDK emits a message. A stalled
-# API call emits nothing (2026-08-07: one turn sat 344s between query and first
-# token), leaving the placeholder frozen on the initial text — indistinguishable
-# from a dead bot. The heartbeat re-pushes the same view in that gap; only the
-# elapsed time changes, so the reply text is never disturbed.
+# The stream only edits when the SDK emits something; a stalled API call emits
+# nothing (2026-08-07: 344s before the first token) and looks like a dead bot.
 _HEARTBEAT_INTERVAL_S = 20
 
 
@@ -72,6 +64,8 @@ class BrainResult:
     tool_use_count: int = 0
     stop_reason: str | None = None
     error: str | None = None
+    duration_api_ms: int = 0
+    ttft_ms: int | None = None
 
 
 def make_brain_options_factory(
@@ -119,27 +113,16 @@ def make_brain_options_factory(
         return ClaudeAgentOptions(
             system_prompt=_prompt(policy.system_prompt),
             mcp_servers={"agentic": server},
-            # Pin the brain model explicitly (was unset → ran on the CLI default).
-            # Default Opus for reasoning quality; tunable via BRAIN_MODEL if cost
-            # matters more than depth on a given deployment.
+            # Both pinned, not left to the CLI default (see config.py).
             model=settings.brain_model,
-            # Pin reasoning depth explicitly (was unset → CLI default).
             **({"effort": settings.brain_effort} if settings.brain_effort else {}),
-            # Token-level StreamEvents → the placeholder types the reply out live.
-            # Without this the stream only ticks per finished AssistantMessage, so a
-            # tool-heavy turn shows nothing but the tool/heartbeat line until the end.
+            # Token-level StreamEvents; without them a tool-heavy turn shows nothing
+            # but the tool/heartbeat line until the very end.
             include_partial_messages=True,
             permission_mode="default",
-            # SDK-native circuit breakers — the agent loop stops itself before the
-            # wall-clock deadline in run_brain_session fires. 0 → leave unset
-            # (SDK default = unbounded) so an operator can opt out per cap.
             **_loop_caps(),
-            # The brain runs with the full default tool palette (incl. Bash — that's
-            # how it does `go build`/git/gh; the dev sub-agent can't get Bash from
-            # the SDK, so the brain orchestrates git/build itself). Deny rules are
-            # evaluated first and strip the tool from context entirely, closing the
-            # history-rewrite hole at the session level: force-push / reset --hard /
-            # clean are blocked for the brain too, not just the dev sub-agent.
+            # Deny rules strip the tool from context before can_use_tool, so this
+            # closes history-rewrite for the brain itself, not just the dev sub-agent.
             disallowed_tools=SESSION_DISALLOWED_TOOLS,
             can_use_tool=cb,
             agents=agents,
@@ -152,10 +135,8 @@ def make_brain_options_factory(
                 if hasattr(session_store, "for_thread")
                 else session_store
             ),
-            # Empty = load no user/project/local settings. Unset would make the CLI
-            # fall back to its own default (user+project+local), which pulled the
-            # host's personal ~/.claude skills listing into the bot's prefix — off
-            # topic, and its Vietnamese trigger phrases drifted the reply language.
+            # Empty, not unset: the CLI's default (user+project+local) pulled the
+            # host's personal ~/.claude skills into the bot's prefix.
             setting_sources=[],
             cwd=cwd,
             add_dirs=add_dirs,
@@ -246,14 +227,12 @@ async def run_brain_session(
     last_tool_label = ""
     result_msg: ResultMessage | None = None
     error: str | None = None
+    # Everything before the first token is waiting, not generating — the half of a
+    # slow turn `duration_api_ms` alone can't tell you about.
+    ttft_ms: int | None = None
 
-    # Per-tool runs logging now lives in the PostToolUse/PostToolUseFailure hooks
-    # (§12.J); the stream loop only buffers text for Slack and counts tool uses
-    # for the footer.
-    # Wall-clock circuit breaker: a hung SDK subprocess must not pin this worker
-    # forever (the SDK-native max_turns/max_budget caps stop a *looping* agent, but
-    # not a stalled stream). 0 disables the deadline. On expiry the pooled client is
-    # discarded below — its receive stream is half-consumed and unsafe to reuse.
+    # Wall-clock breaker for a stalled stream — the SDK-native caps only stop a
+    # *looping* agent. 0 disables it; on expiry the pooled client is discarded below.
     deadline = settings.brain_timeout_s if settings.brain_timeout_s > 0 else None
     timed_out = False
     stop_heartbeat = asyncio.Event()
@@ -270,20 +249,22 @@ async def run_brain_session(
                     if ev.get("type") == "content_block_delta":
                         delta = ev.get("delta") or {}
                         if delta.get("type") == "text_delta" and delta.get("text"):
+                            if ttft_ms is None:
+                                ttft_ms = int((time.monotonic() - t_start) * 1000)
                             live.append(delta["text"])
                             await progress.render("".join(live))
                 elif isinstance(msg, AssistantMessage):
+                    if ttft_ms is None:  # no partials on this turn
+                        ttft_ms = int((time.monotonic() - t_start) * 1000)
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
                             text_parts.append(block.text)
                         elif isinstance(block, ToolUseBlock):
                             tool_use_count += 1
                             last_tool_label = _tool_label(block.name)
-                    # Token deltas already drive the view when they arrive; this is
-                    # the fallback for a turn without partials. Until any prose
-                    # exists, surface tool activity so the placeholder isn't frozen
-                    # for the whole tool phase (the brain front-loads Loki/GitHub/git
-                    # calls before writing).
+                    # Fallback for a turn without partials; before any prose exists,
+                    # show tool activity so the placeholder isn't frozen through the
+                    # brain's front-loaded tool phase.
                     view = "".join(live) or "".join(text_parts) or _tool_progress(
                         last_tool_label, tool_use_count
                     )
@@ -319,17 +300,14 @@ async def run_brain_session(
         result_msg.result if result_msg and result_msg.result
         else "".join(text_parts)
     ).strip()
-    usage = (result_msg.usage if result_msg else None) or {}
+    usage = _turn_usage(result_msg)
     duration_ms = (result_msg.duration_ms if result_msg and result_msg.duration_ms
                    else int((time.monotonic() - t_start) * 1000))
     session_id = (result_msg.session_id if result_msg else "") or ""
     cost = result_msg.total_cost_usd if result_msg else None
     if result_msg and result_msg.is_error and not error:
-        # A per-turn cap (max_turns / max_budget_usd) makes the SDK flag the result
-        # as an error while reporting the last turn's natural stop_reason
-        # (`tool_use` when cut mid-tool-loop, `end_turn`/`max_tokens` otherwise).
-        # Surface a human note instead of the cryptic raw reason, and keep whatever
-        # partial reply we streamed — the answer is truncated, not lost.
+        # A per-turn cap flags is_error but reports the last turn's *natural*
+        # stop_reason, so these three values are how a cap is recognised at all.
         if (result_msg.stop_reason or "") in {"tool_use", "end_turn", "max_tokens"}:
             error = (
                 "hit the per-turn safety limit (step count or cost) — "
@@ -342,9 +320,8 @@ async def run_brain_session(
             )
         else:
             error = result_msg.result or result_msg.stop_reason or "result_error"
-            # Bare "result_error" (both fields empty) is undiagnosable after the
-            # fact — one turn logged exactly that and left nothing to go on. Dump
-            # what the ResultMessage did carry.
+            # Bare "result_error" (both fields empty) is undiagnosable later, so
+            # dump whatever else the ResultMessage carried.
             log.error(
                 "brain result error thread=%s stop=%s subtype=%s turns=%s "
                 "cost=%s session=%s result=%r",
@@ -359,11 +336,14 @@ async def run_brain_session(
         except Exception:
             log.exception("persist sdk_session_id failed thread=%s", thread_ts)
 
+    api_ms = (result_msg.duration_api_ms or 0) if result_msg else 0
     log.info(
-        "sdk brain thread=%s cache_read=%d cache_create=%d in=%d out=%d cost=%s",
+        "sdk brain thread=%s cache_read=%d cache_create=%d in=%d out=%d cost=%s "
+        "wall=%dms api=%dms ttft=%s",
         thread_ts, usage.get("cache_read_input_tokens", 0),
         usage.get("cache_creation_input_tokens", 0), usage.get("input_tokens", 0),
         usage.get("output_tokens", 0), f"${cost:.4f}" if cost is not None else "?",
+        duration_ms, api_ms, f"{ttft_ms}ms" if ttft_ms is not None else "-",
     )
     return BrainResult(
         reply=final_text, session_id=session_id, usage=usage,
@@ -372,6 +352,8 @@ async def run_brain_session(
         tool_use_count=tool_use_count,
         stop_reason=result_msg.stop_reason if result_msg else None,
         error=error,
+        duration_api_ms=api_ms,
+        ttft_ms=ttft_ms,
     )
 
 
@@ -437,6 +419,29 @@ def _fmt_elapsed(seconds: float) -> str:
     return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
 
 
+_MODEL_USAGE_KEYS = (  # snake_case (runs columns) ← camelCase (model_usage)
+    ("input_tokens", "inputTokens"),
+    ("output_tokens", "outputTokens"),
+    ("cache_read_input_tokens", "cacheReadInputTokens"),
+    ("cache_creation_input_tokens", "cacheCreationInputTokens"),
+)
+
+
+def _turn_usage(result_msg: ResultMessage | None) -> dict:
+    """Whole-turn token totals. `usage` counts the main agent only, while
+    `total_cost_usd` bills sub-agents too (2026-08-12: 79k tok vs $1.81, 12× off),
+    so sum `model_usage` — it's per-model and includes them."""
+    if result_msg is None:
+        return {}
+    by_model = result_msg.model_usage or {}
+    if not by_model:
+        return result_msg.usage or {}
+    return {
+        snake: sum(int(m.get(camel) or 0) for m in by_model.values())
+        for snake, camel in _MODEL_USAGE_KEYS
+    }
+
+
 class _Progress:
     """Single owner of the placeholder edit slot, shared by the stream loop and
     the heartbeat. The lock keeps the two from interleaving `chat.update` calls
@@ -461,10 +466,8 @@ class _Progress:
                 return
             wait = _STREAM_EDIT_INTERVAL_S - (now - self._last_edit)
             if wait > 0:
-                # Hold the newest view instead of dropping it: the stream usually
-                # stops right after a sentence (the model goes off to call a tool),
-                # so a dropped view leaves Slack showing the first token until the
-                # turn ends — "I" for the whole tool call.
+                # Hold, don't drop: the stream usually stops right before a tool
+                # call, so a dropped view freezes Slack on the first token.
                 self._pending = view
                 if self._flush is None or self._flush.done():
                     self._flush = asyncio.create_task(self._flush_pending(wait))
