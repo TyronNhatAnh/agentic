@@ -130,6 +130,30 @@ async def test_java_logs_rejects_single_quote_before_the_round_trip():
     assert not r.ok and r.error_code == "VALIDATION"
 
 
+@pytest.mark.parametrize("bad", ["web-api.log; id", "../../etc/passwd", "a b.log", "$(id)"])
+async def test_java_logs_rejects_injectable_file(bad):
+    """`file` is interpolated unquoted into the command jlog.sh sends over ssh."""
+    r = await jl.search(env="prod", app="web-api", file=bad)
+    assert not r.ok and r.error_code == "VALIDATION"
+
+
+async def test_java_logs_accepts_a_real_rotated_filename():
+    """The allowlist must not reject the names `ls` actually returns."""
+    assert jl._FILE_RE.match("web-api.log.3")
+    assert jl._FILE_RE.match("localhost_access_log.2026-08-11.txt")
+
+
+@pytest.mark.parametrize("bad", ["2026-08-11", "'''+__import__('os').system('id')+'''", "now-1h"])
+async def test_java_logs_rejects_non_timestamp_kst(bad):
+    """`kst` lands inside a python -c source in the wrapper."""
+    r = await jl.search(env="prod", app="web-api", kst=bad)
+    assert not r.ok and r.error_code == "VALIDATION"
+
+
+async def test_java_logs_accepts_the_documented_kst_format():
+    assert jl._KST_RE.match("2026-08-11 11:18")
+
+
 async def test_java_logs_reports_missing_wrapper_as_config(monkeypatch):
     monkeypatch.setenv("JLOG_SCRIPT", "/nonexistent/jlog.sh")
     r = await jl.search(env="stag", app="web-api")
@@ -145,3 +169,57 @@ def test_java_logs_wrapper_path_default_is_the_shared_skill():
     assert jl._DEFAULT_SCRIPT == (
         Path.home() / ".claude" / "skills" / "gogox-java-logs" / "jlog.sh"
     )
+
+
+# --- 4x "Read: File content exceeds maximum allowed tokens" ------------------
+# 2026-08-11: max_chars=80000 on one PR spilled the result to a single-line
+# tool-results JSON, which Read's line-based offset/limit cannot shrink. Four
+# identical failed Reads, then six `.{300}` Greps scraping the temp file.
+
+async def test_pr_diff_caps_max_chars_above_the_ceiling(monkeypatch):
+    from agentic.integrations import github as gh
+
+    long_diff = "x" * 200_000
+
+    class _R:
+        text = long_diff
+        def raise_for_status(self): pass
+
+    class _C:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, *a, **k): return _R()
+
+    monkeypatch.setattr(gh.httpx, "AsyncClient", lambda **k: _C())
+    out = await gh.get_pr_diff(1, repo="gogovan/x", max_chars=80_000)
+    assert len(out) < gh._MAX_DIFF_CHARS + 1000
+    assert "capped at 40000" in out
+    assert "Raising max_chars will not return more" in out
+
+
+async def test_pr_diff_honours_a_smaller_request(monkeypatch):
+    from agentic.integrations import github as gh
+
+    class _R:
+        text = "y" * 50_000
+        def raise_for_status(self): pass
+
+    class _C:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, *a, **k): return _R()
+
+    monkeypatch.setattr(gh.httpx, "AsyncClient", lambda **k: _C())
+    out = await gh.get_pr_diff(1, repo="gogovan/x", max_chars=5_000)
+    assert "truncated at 5000 of 50000" in out
+    assert "capped at" not in out, "no cap note when the caller asked for less"
+
+
+def test_tool_descriptions_name_no_nonexistent_org():
+    """`GoGoXTech/order-service` was an example org that 404s; the brain turned it
+    into `org:gogox-tech` and got a 422."""
+    import re
+    from pathlib import Path as _P
+
+    src = _P("src/agentic/sdk/mcp_tools.py").read_text()
+    assert not re.search(r"(?i)gogox-?tech", src)

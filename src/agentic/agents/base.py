@@ -8,11 +8,9 @@ markdown system prompts that the SDK brain session + AgentDefinitions load.
 from pathlib import Path
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
-# The brain's cwd is the thread's tier repo, not this repo, so a relative doc
-# path in a prompt resolves somewhere that doesn't exist (5 dead Reads of
-# `docs/GOGOX_ARCHITECTURE.md` in 3 days). Prompts write `{DOCS}/x.md` and get
-# the absolute path — same trick `_ARCH_DOC`/`_DB_TABLES_DOC` use for tool
-# descriptions. Host-constant, so the session prefix cache stays warm.
+# The brain's cwd is the thread's service repo, so a relative `docs/…` in a prompt
+# resolves nowhere. Prompts write `{DOCS}/x.md` and get this absolute path.
+# Assumes the editable install layout (repo root = parents[3]).
 DOCS_DIR = Path(__file__).resolve().parents[3] / "docs"
 
 

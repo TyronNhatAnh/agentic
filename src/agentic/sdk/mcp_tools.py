@@ -443,7 +443,7 @@ async def github_search(args: dict[str, Any]) -> dict[str, Any]:
             "repo": {
                 "type": "string",
                 "description": (
-                    "exact `owner/name` slug (e.g. `GoGoXTech/order-service`) — NOT a "
+                    "exact `owner/name` slug (e.g. `gogovan/ggx-kr-order-service`) — NOT a "
                     "loose service name. Resolve it via `list_services` first; never "
                     "guess the owner/org."
                 ),
@@ -461,7 +461,13 @@ async def github_get_pr(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "github_get_pr_diff",
-    "Fetch a PR's unified diff, truncated to max_chars (default 20000)." + _ARCH_HINT,
+    (
+        "Fetch a PR's unified diff, truncated to max_chars (default 20000, hard cap "
+        "40000). Asking for more than the cap returns the same amount — a larger "
+        "result gets spilled to a temp file that cannot be read back. For a diff "
+        "bigger than the cap, review it from a `git_prepare_pr_review_workspace` "
+        "checkout instead of re-fetching."
+    ) + _ARCH_HINT,
     {
         "type": "object",
         "properties": {
@@ -469,7 +475,7 @@ async def github_get_pr(args: dict[str, Any]) -> dict[str, Any]:
             "repo": {
                 "type": "string",
                 "description": (
-                    "exact `owner/name` slug (e.g. `GoGoXTech/order-service`) — NOT a "
+                    "exact `owner/name` slug (e.g. `gogovan/ggx-kr-order-service`) — NOT a "
                     "loose service name. Resolve it via `list_services` first; never "
                     "guess the owner/org."
                 ),

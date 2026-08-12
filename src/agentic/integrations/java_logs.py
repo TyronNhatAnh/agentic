@@ -1,30 +1,20 @@
-"""Java (Tomcat) log reads over the Pi bastion.
+"""Java (Tomcat) log reads over the Pi bastion — the web-* apps, api-layer and
+node-message are files on EC2, not in Loki.
 
-The web-java apps (`web-admin`/`web-api`/`web-b2b`/`web-b2c`/`web-driver`,
-`catalina`, the Apache access log), api-layer and node-message do **not** ship to
-Loki — their logs are files on EC2, reached through the Pi bastion which holds
-the company VPN. `grafana_search_logs` covers the Go/chatbot services only; every
-`web-api has no loki_selector` error was the brain asking Loki for something that
-was never there.
-
-This wraps the `jlog.sh` wrapper rather than re-implementing it: the wrapper
-already encodes the parts that are easy to get wrong and expensive to relearn —
-PROD is two Tomcat nodes (`krprod1`+`krprod2`) and querying one is a false-negative
-source, Tomcat logs are UTC while the access log and node-message are KST, and
-the EC2 side of the pipe only accepts bare tokens.
-
-Auth is a Cloudflare Access token in `~/.cloudflared` plus an SSH key, both owned
-by the host user — nothing to configure here. The token is long-lived (~30d) and
-`ssh -o BatchMode=yes` works without a browser, verified 2026-08-12; when it does
-expire the refresh needs a human, so that failure is reported as AUTH rather than
-retried.
+Wraps `jlog.sh` instead of re-implementing it: the wrapper owns the two-prod-node
+fan-out (querying one node is a false-negative source) and the UTC/KST split.
+Auth (Cloudflare Access + SSH key) belongs to the host user; expiry needs a human,
+hence AUTH rather than a retry.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import re
 import shutil
+import signal
 from pathlib import Path
 
 from .result import ToolResult
@@ -39,10 +29,10 @@ APPS = {
 }
 ENVS = {"stag", "prod"}
 
-# The slow path pulls whole log files EC2→Pi (~41s per node, two nodes on prod);
-# `-F` keeps the grep on EC2 and lands in ~10s. 240s covers the slow path without
-# letting a pathological call hold a worker for the full brain turn.
-_TIMEOUT_S = 240
+# jlog's own ceiling is `timeout 120 ssh` per node × 2 prod nodes, run in sequence,
+# plus fmt.py — so a 240s cap would fire on the slow path instead of letting the
+# wrapper report per-node. Sit above it.
+_TIMEOUT_S = 300
 # Cap what reaches the transcript: every returned line is re-read on each later
 # turn of the thread. The wrapper's own `-m` already trims; this is the backstop.
 _MAX_CHARS = 12000
@@ -52,7 +42,16 @@ def _script() -> Path:
     return Path(os.environ.get("JLOG_SCRIPT") or _DEFAULT_SCRIPT)
 
 
-def _validate(env: str, app: str, grep: str, vgrep: str) -> ToolResult | None:
+# `file` and `kst` are interpolated *unquoted* into the command jlog.sh sends over
+# ssh (and `kst` also into a python -c source), so anything but a plain filename /
+# timestamp is a shell injection on the bastion. Allowlist, not escaping.
+_FILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
+_KST_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+
+
+def _validate(
+    env: str, app: str, grep: str, vgrep: str, file: str, kst: str
+) -> ToolResult | None:
     if env not in ENVS:
         return ToolResult.failure("VALIDATION", f"env must be stag|prod, got `{env}`.")
     if app not in APPS:
@@ -69,6 +68,16 @@ def _validate(env: str, app: str, grep: str, vgrep: str) -> ToolResult | None:
                 f"`{name}` can't contain a single quote (it breaks quoting on the "
                 "bastion) — use `.` as a wildcard instead.",
             )
+    if file and not _FILE_RE.match(file):
+        return ToolResult.failure(
+            "VALIDATION",
+            f"`file` must be a bare log filename (letters, digits, `.`, `_`, `-`), "
+            f"got `{file}`. Run app=`ls` to see the real names.",
+        )
+    if kst and not _KST_RE.match(kst):
+        return ToolResult.failure(
+            "VALIDATION", f"`kst` must be 'YYYY-MM-DD HH:MM', got `{kst}`."
+        )
     return None
 
 
@@ -87,7 +96,7 @@ async def search(
     node: str = "",
 ) -> ToolResult:
     """Read one app's log through the bastion. Read-only on prod."""
-    if err := _validate(env, app, grep, exclude):
+    if err := _validate(env, app, grep, exclude, file, kst):
         return err
     script = _script()
     if not script.is_file():
@@ -128,11 +137,19 @@ async def search(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env={**os.environ, "SSH_ASKPASS": "", "BATCH": "1"},
+            # Own process group so a timeout can kill jlog.sh *and* the ssh it
+            # spawned, without signalling the bot itself.
+            start_new_session=True,
         )
         raw_out, raw_err = await asyncio.wait_for(
             proc.communicate(), timeout=_TIMEOUT_S
         )
     except TimeoutError:
+        # wait_for only cancels the await; the tree keeps pulling log files off prod.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            await proc.wait()
         return ToolResult.failure(
             "TIMEOUT",
             f"jlog timed out after {_TIMEOUT_S}s. Narrow it: pass `fast=true` with a "

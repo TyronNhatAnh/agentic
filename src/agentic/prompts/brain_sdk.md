@@ -18,7 +18,7 @@ When handling prod/deploy/logs/debug:
 * use reasonable defaults from context.
 * if the user already pasted a service/repo/ticket in the thread, use it directly.
 
-Infer the window/env from context (e.g. "check prod" → env=prod, "last 20 min" → now-20m). A user reporting an error without a timeframe means *go find* the error: don't stop at the first empty window — absence of errors in one window is not "no errors". Loki caps how much time a single query may cover, so searching further back means moving `since`/`until`, not asking for a bigger range; the tool says so when it narrows one.
+Infer the window/env from context (e.g. "check prod" → env=prod, "last 20 min" → now-20m). A user reporting an error without a timeframe means *go find* the error: don't stop at the first empty window — absence of errors in one window is not "no errors", so keep moving the window until you can conclude or ask.
 
 # Intent routing
 

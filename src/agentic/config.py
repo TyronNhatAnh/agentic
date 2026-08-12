@@ -112,15 +112,11 @@ class Settings(BaseSettings):
     #  - brain_timeout_s: wall-clock deadline on one brain turn. On expiry the
     #    pooled client is discarded (its receive stream is half-consumed and unsafe
     #    to reuse) and the next turn opens a fresh session via the resume token.
-    #  - brain_max_turns / brain_max_budget_usd: SDK-native caps passed into
-    #    ClaudeAgentOptions so the agent loop stops itself before the wall-clock
-    #    deadline. 0 disables a cap (falls back to SDK default = unbounded), and
-    #    both default to 0 — they cut deep multi-service investigations
-    #    mid-answer. So there is currently NO cost ceiling on a turn: the
-    #    wall-clock timeout bounds a stalled session, not a fast expensive one.
-    #    Set them if that matters. Live-verified caveats when enabled: max_turns
-    #    is best-effort (one live run in N did not cut), and max_budget_usd is
-    #    checked *between* turns — one pathological turn can overshoot it.
+    #  - brain_max_turns / brain_max_budget_usd: SDK-native caps, both shipped 0
+    #    (= off) because they cut deep investigations mid-answer — so nothing
+    #    bounds the cost of a fast expensive turn, only a stalled one. When
+    #    enabled: max_turns is best-effort and max_budget_usd is checked between
+    #    turns, so one pathological turn can still overshoot.
     brain_timeout_s: int = Field(default=1200, alias="BRAIN_TIMEOUT_S")
     brain_max_turns: int = Field(default=0, alias="BRAIN_MAX_TURNS")
     brain_max_budget_usd: float = Field(default=0.0, alias="BRAIN_MAX_BUDGET_USD")

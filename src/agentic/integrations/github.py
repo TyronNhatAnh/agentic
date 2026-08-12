@@ -442,8 +442,21 @@ async def get_pr(pr: int, repo: str | None = None) -> str:
     )
 
 
+# Hard ceiling on the returned diff, independent of the caller's `max_chars`.
+# A result the SDK considers too large is spilled to a `tool-results/toolu_*.json`
+# file and replaced by a pointer. That file is a SINGLE JSON line, so reading it
+# back with Read's line-based offset/limit cannot shrink it under the 25k-token
+# read limit — 2026-08-11 saw `max_chars=80000` on one PR produce four identical
+# failed Reads and six `.{300}` Greps to scrape the spilled file 300 chars at a
+# time. ~3 chars/token on diff text puts 40k chars near 13k tokens, well clear.
+# A diff bigger than this is reviewed per-file, not by asking for more at once.
+_MAX_DIFF_CHARS = 40000
+
+
 async def get_pr_diff(pr: int, repo: str | None = None, max_chars: int = 20000) -> str:
     repo = _repo(repo)
+    asked = max(1, int(max_chars))
+    limit = min(asked, _MAX_DIFF_CHARS)
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.get(
             f"{API}/repos/{repo}/pulls/{pr}",
@@ -451,9 +464,15 @@ async def get_pr_diff(pr: int, repo: str | None = None, max_chars: int = 20000) 
         )
         r.raise_for_status()
         diff = r.text
-    truncated = len(diff) > max_chars
-    if truncated:
-        diff = diff[:max_chars] + f"\n... [truncated, total {len(r.text)} chars]"
+    total = len(diff)
+    if total > limit:
+        capped = f" (max_chars {asked} capped at {_MAX_DIFF_CHARS})" if asked > limit else ""
+        diff = (
+            diff[:limit]
+            + f"\n... [truncated at {limit} of {total} chars{capped}. Raising max_chars "
+            "will not return more — read the rest from a `git_prepare_pr_review_workspace` "
+            "checkout, or `git diff` the paths you still need.]"
+        )
     return f"*PR #{pr} `{repo}` diff*:\n```\n{diff}\n```"
 
 

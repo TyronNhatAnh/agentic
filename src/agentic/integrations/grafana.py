@@ -98,13 +98,9 @@ def _to_ns(expr: str) -> str:
     return str(int(dt.timestamp() * 1_000_000_000))
 
 
-# Longest span one query may cover. Loki times out server-side on a wide range
-# with a regex filter (observed: `now-24h` and `now-7d` over `{namespace="kr-prod"}`
-# with a `|~` alternation, both dead at 30s), and a timeout returns nothing at all —
-# strictly worse than a narrower window that answers. Clamped here rather than asked
-# for in the prompt because the prompt used to say the opposite ("scan wide enough")
-# and the model has no way to know the range is too wide until it has already burned
-# the call. The brain walks `since`/`until` back a window at a time to go further.
+# Longest span one query may cover: Loki dies server-side at 30s on a wider range
+# with a regex filter (observed on `now-24h` and `now-7d`), and a timeout returns
+# nothing — worse than a narrow window that answers.
 _MAX_SPAN_NS = 2 * 3600 * 1_000_000_000
 _SPAN_SLACK_NS = 5 * 1_000_000_000
 
@@ -117,9 +113,8 @@ def _clamp_span(start_ns: str, end_ns: str) -> tuple[str, str, str]:
     """
     start, end = int(start_ns), int(end_ns)
     span = end - start
-    # `since` and `until` are resolved by separate time.time_ns() calls, so an
-    # exact `now-2h`→`now` lands microseconds over the cap. Without slack the
-    # most ordinary query at the limit gets a bogus "narrowed 2.0h → 2h" note.
+    # `since`/`until` resolve via separate time.time_ns() calls, so an exact
+    # `now-2h`→`now` lands just over the cap and would report "2.0h → 2h".
     if span <= _MAX_SPAN_NS + _SPAN_SLACK_NS:
         return start_ns, end_ns, ""
     clamped = end - _MAX_SPAN_NS
@@ -160,7 +155,8 @@ def _fmt_ts(ts_ns: str) -> str:
 
 
 def _format_streams(
-    payload: dict, *, query: str, env: str, limit: int, since: str, until: str
+    payload: dict, *, query: str, env: str, limit: int, since: str, until: str,
+    clamped: bool = False,
 ) -> str:
     data = payload.get("data") or {}
     result = data.get("result") or []
@@ -184,10 +180,17 @@ def _format_streams(
         # so the brain stops and clarifies instead of widening. Echo the exact window
         # scanned (the tool's silent `now-1h` default is otherwise invisible to the
         # model) and name the next moves — mirror the capped-path's self-describing tone.
+        # A clamped window can't be widened — telling the brain to try `now-24h`
+        # there just replays the same 2h slice.
+        widen = (
+            "move `since`/`until` back another 2h (the span is capped, widening is a no-op)"
+            if clamped
+            else "widen `since` (e.g. `now-6h`/`now-24h`)"
+        )
         return (
             f"_0 lines matched `{query}` ({env}) in `{since}`→`{until}`._\n"
             "⚠️ No logs ≠ no error — it just means nothing seen in THIS window/filter. "
-            "When chasing a bug: widen `since` (e.g. `now-6h`/`now-24h`), drop/loosen `filter` "
+            f"When chasing a bug: {widen}, drop/loosen `filter` "
             "(don't lock onto one guessed keyword), or correlate by `request_id`/`trace_id`. "
             'Only conclude "no error" after scanning wide enough.'
         )
@@ -334,10 +337,16 @@ async def search_logs(
             )
         r.raise_for_status()
         payload = r.json()
+    # Report the window actually queried, not the one asked for — the formatter's
+    # header and its zero-result advice are what the brain reasons from next.
+    if clamp_note:
+        since = f"{_fmt_ts(start_ns)} UTC"
+        until = f"{_fmt_ts(end_ns)} UTC"
     return ToolResult.success(
         clamp_note
         + _format_streams(
-            payload, query=query, env=env, limit=limit, since=since, until=until
+            payload, query=query, env=env, limit=limit, since=since, until=until,
+            clamped=bool(clamp_note),
         )
     )
 
