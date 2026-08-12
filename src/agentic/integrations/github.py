@@ -448,9 +448,9 @@ async def get_pr(pr: int, repo: str | None = None) -> str:
 # back with Read's line-based offset/limit cannot shrink it under the 25k-token
 # read limit — 2026-08-11 saw `max_chars=80000` on one PR produce four identical
 # failed Reads and six `.{300}` Greps to scrape the spilled file 300 chars at a
-# time. ~3 chars/token on diff text puts 40k chars near 13k tokens, well clear.
+# time. ~3 chars/token on diff text puts 30k chars near 10k tokens, well clear.
 # A diff bigger than this is reviewed per-file, not by asking for more at once.
-_MAX_DIFF_CHARS = 40000
+_MAX_DIFF_CHARS = 30000
 
 
 async def get_pr_diff(pr: int, repo: str | None = None, max_chars: int = 20000) -> str:

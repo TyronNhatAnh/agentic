@@ -467,7 +467,7 @@ async def github_get_pr(args: dict[str, Any]) -> dict[str, Any]:
     "github_get_pr_diff",
     (
         "Fetch a PR's unified diff, truncated to max_chars (default 20000, hard cap "
-        "40000). Asking for more than the cap returns the same amount — a larger "
+        "30000). Asking for more than the cap returns the same amount — a larger "
         "result gets spilled to a temp file that cannot be read back. For a diff "
         "bigger than the cap, review it from a `git_prepare_pr_review_workspace` "
         "checkout instead of re-fetching."
