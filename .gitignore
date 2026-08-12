@@ -2,6 +2,12 @@
 .env
 .env.local
 *.env.local
+# Timestamped backups (.env.bak.<epoch>) fell outside `.env` and got committed
+# once by a blanket `git add` — match every variant, not just the bare name.
+.env.*
+*.env.*
+!.env.example
+*.bak
 
 # Python
 __pycache__/
