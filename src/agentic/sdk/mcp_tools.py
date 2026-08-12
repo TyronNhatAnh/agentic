@@ -31,6 +31,7 @@ from ..integrations import db as db_int
 from ..integrations import git as git_int
 from ..integrations import github as github_int
 from ..integrations import grafana as grafana_int
+from ..integrations import java_logs as java_logs_int
 from ..integrations import jira as jira_int
 from ..integrations import notion as notion_int
 from ..integrations import ship as ship_int
@@ -1044,10 +1045,15 @@ async def notion_delete_page(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "grafana_search_logs",
     (
-        "Query Loki via Grafana for logs. Provide either `query` (full LogQL) or "
-        "`service` + optional `filter` (line filter expression like `|= \"error\"` "
-        "or `|~ \"(?i)error|exception\"`). Times use Grafana shorthand "
-        "(`now`, `now-1h`, `now-30m`). Read-only — no confirm."
+        "Query Loki via Grafana for logs of the **Go/chatbot services only**. The "
+        "Java web-* apps and api-layer are NOT in Loki — use `java_logs` for those. "
+        "Provide either `query` (full LogQL) or `service` + optional `filter` (line "
+        "filter expression like `|= \"error\"` or `|~ \"(?i)error|exception\"`). "
+        "Times use Grafana shorthand (`now`, `now-1h`, `now-30m`); a span longer "
+        "than 2h is clamped to the newest 2h — walk `since`/`until` back a window "
+        "at a time to search further, don't ask for `now-24h`. Prefer `|=` over a "
+        "`|~` alternation and always keep the stream selector narrow (a bare "
+        "`{namespace=\"kr-prod\"}` with a regex filter times out). Read-only — no confirm."
     ),
     {
         "type": "object",
@@ -1079,6 +1085,63 @@ async def grafana_search_logs(args: dict[str, Any]) -> dict[str, Any]:
             log_filter=args.get("filter", ""),
         ),
         retryable_read=True, service="Grafana", retry_timeout=False,
+    )
+
+
+@tool(
+    "java_logs",
+    (
+        "Read the Java/Tomcat logs that are NOT in Loki: `web-admin` `web-api` "
+        "`web-b2b` `web-b2c` `web-driver` `catalina`, plus `access` (Apache access "
+        "log), `apl` (api-layer) and `msg` (node-message/alimtalk). Use this — not "
+        "`grafana_search_logs` — for any web-* or api-layer question. `ls` lists the "
+        "log files, including rotated ones.\n"
+        "Searching by an id (order id, phone, request id): pass `fast=true` with that "
+        "bare token — it greps on the EC2 box (~8x faster, ~10s vs ~80s) instead of "
+        "pulling the file across the VPN. `fast` only accepts a plain token "
+        "(A-Za-z0-9_.:-); for a regex or a pattern with spaces leave it off.\n"
+        "PROD is two Tomcat nodes and a request lands on only one — both are searched "
+        "by default, so don't pin `node` unless one is failing. Tomcat timestamps are "
+        "UTC; pass `kst` ('YYYY-MM-DD HH:MM', the time the user reported) rather than "
+        "converting by hand. Prod logs carry real customer PII: quote the lines you "
+        "need, never dump a block into Slack."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "env": {"type": "string", "enum": ["stag", "prod"]},
+            "app": {"type": "string", "enum": sorted(java_logs_int.APPS)},
+            "grep": {"type": "string", "description": "grep -E pattern; no single quotes"},
+            "exclude": {"type": "string", "description": "drop lines matching this"},
+            "lines": {"type": "integer", "description": "tail N lines on EC2 (default 2000); ignored when fast=true"},
+            "tail": {"type": "integer", "description": "keep N last matching lines (default 80)"},
+            "count": {"type": "boolean", "description": "return only the match count — cheapest way to confirm something happened"},
+            "fast": {"type": "boolean", "description": "grep on EC2; bare token only"},
+            "kst": {"type": "string", "description": "'YYYY-MM-DD HH:MM' in KST"},
+            "file": {"type": "string", "description": "specific log file, e.g. web-api.log.3"},
+            "node": {"type": "string", "enum": ["1", "2"], "description": "prod only; default searches both"},
+        },
+        "required": ["env", "app"],
+    },
+)
+async def java_logs(args: dict[str, Any]) -> dict[str, Any]:
+    return await _run_with_retry(
+        lambda: java_logs_int.search(
+            env=args.get("env", "prod"),
+            app=args.get("app", "web-api"),
+            grep=args.get("grep", ""),
+            exclude=args.get("exclude", ""),
+            lines=int(args.get("lines", 2000)),
+            tail=int(args.get("tail", 80)),
+            count=bool(args.get("count", False)),
+            fast=bool(args.get("fast", False)),
+            kst=args.get("kst", ""),
+            file=args.get("file", ""),
+            node=args.get("node", ""),
+        ),
+        # Read-only, but a retry re-pulls megabytes across the VPN off a prod box;
+        # the integration already marks the one worth retrying (a node that errored).
+        retryable_read=False, service="Java logs",
     )
 
 
@@ -1233,8 +1296,10 @@ _ALL_TOOLS = [
     git_prepare_pr_review_workspace, git_commit, git_push,
     # notion (4)
     notion_create_page, notion_get_page, notion_update_page, notion_delete_page,
-    # grafana (2)
+    # grafana (2) — Go/chatbot services only
     grafana_search_logs, grafana_list_datasources,
+    # java/tomcat logs via the Pi bastion (1) — the web-* apps aren't in Loki
+    java_logs,
     # staging db (1)
     db_query,
     # prod db (1) — read-only, inline

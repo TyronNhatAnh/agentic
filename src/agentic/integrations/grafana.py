@@ -98,6 +98,36 @@ def _to_ns(expr: str) -> str:
     return str(int(dt.timestamp() * 1_000_000_000))
 
 
+# Longest span one query may cover. Loki times out server-side on a wide range
+# with a regex filter (observed: `now-24h` and `now-7d` over `{namespace="kr-prod"}`
+# with a `|~` alternation, both dead at 30s), and a timeout returns nothing at all —
+# strictly worse than a narrower window that answers. Clamped here rather than asked
+# for in the prompt because the prompt used to say the opposite ("scan wide enough")
+# and the model has no way to know the range is too wide until it has already burned
+# the call. The brain walks `since`/`until` back a window at a time to go further.
+_MAX_SPAN_NS = 2 * 3600 * 1_000_000_000
+
+
+def _clamp_span(start_ns: str, end_ns: str) -> tuple[str, str, str]:
+    """Cap the query span at `_MAX_SPAN_NS`, keeping the newest slice.
+
+    Returns (start, end, note) — the note is prefixed to the result so the brain
+    sees the window it actually got, not the one it asked for.
+    """
+    start, end = int(start_ns), int(end_ns)
+    span = end - start
+    if span <= _MAX_SPAN_NS:
+        return start_ns, end_ns, ""
+    clamped = end - _MAX_SPAN_NS
+    asked_h = span / 3_600_000_000_000
+    return (
+        str(clamped),
+        end_ns,
+        f"_⚠️ Window narrowed {asked_h:.1f}h → 2h (newest slice); a wider range "
+        f"times out. To look further back, move `since`/`until` back 2h at a time._\n\n",
+    )
+
+
 _HEADERS = {"Accept": "application/json"}
 
 
@@ -272,6 +302,7 @@ async def search_logs(
             f"Invalid time range (since=`{since}`, until=`{until}`). "
             "Use `now`, `now-15m`/`now-1h`/`now-24h`, or RFC3339.",
         )
+    start_ns, end_ns, clamp_note = _clamp_span(start_ns, end_ns)
     params = {
         "query": query,
         "start": start_ns,
@@ -300,7 +331,8 @@ async def search_logs(
         r.raise_for_status()
         payload = r.json()
     return ToolResult.success(
-        _format_streams(
+        clamp_note
+        + _format_streams(
             payload, query=query, env=env, limit=limit, since=since, until=until
         )
     )
