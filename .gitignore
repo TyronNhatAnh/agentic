@@ -6,6 +6,7 @@
 # once by a blanket `git add` — match every variant, not just the bare name.
 .env.*
 *.env.*
+*.env
 !.env.example
 *.bak
 
