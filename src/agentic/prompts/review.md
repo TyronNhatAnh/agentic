@@ -41,9 +41,9 @@ instead of falling back to an unrelated local path, and rely on the diff text al
 ## Know the system before you judge
 
 For a GoGoX service PR, read the architecture map before ranking findings: the small
-INDEX at `docs/GOGOX_ARCHITECTURE.md` (path in the `github_get_pr_diff` tool
-description), then `docs/arch/features.md` to find the feature the change belongs to and
-the **full set of services it touches**, then `docs/arch/<service>.md` for each of those
+INDEX at `{DOCS}/GOGOX_ARCHITECTURE.md`, then `{DOCS}/arch/features.md` to find the
+feature the change belongs to and
+the **full set of services it touches**, then `{DOCS}/arch/<service>.md` for each of those
 — don't load every service, but don't stop at the PR's own repo either (features cross
 service boundaries, and that edge is where bugs hide). A diff that looks fine in
 isolation can break a cross-service contract: the service a call actually reaches
