@@ -27,12 +27,14 @@ from agentic.config import settings
 # ============================================================================
 
 
-def test_loop_caps_present_by_default():
+def test_loop_caps_present_when_configured(monkeypatch):
     from agentic.sdk.brain_session import _loop_caps
 
+    monkeypatch.setattr(settings, "brain_max_turns", 40)
+    monkeypatch.setattr(settings, "brain_max_budget_usd", 5.0)
     caps = _loop_caps()
-    assert caps["max_turns"] == settings.brain_max_turns
-    assert caps["max_budget_usd"] == settings.brain_max_budget_usd
+    assert caps["max_turns"] == 40
+    assert caps["max_budget_usd"] == 5.0
 
 
 def test_loop_caps_omitted_when_zero(monkeypatch):
@@ -43,11 +45,13 @@ def test_loop_caps_omitted_when_zero(monkeypatch):
     assert _loop_caps() == {}
 
 
-async def test_brain_options_wire_loop_caps():
+async def test_brain_options_wire_loop_caps(monkeypatch):
     from agentic.sdk import PendingPermissions
     from agentic.sdk.brain_session import make_brain_options_factory
     from agentic.store import init_db, touch_thread
 
+    monkeypatch.setattr(settings, "brain_max_turns", 40)
+    monkeypatch.setattr(settings, "brain_max_budget_usd", 5.0)
     init_db()
     thread_ts = "1700000000.caps01"
     touch_thread(thread_ts, "C_CAPS")

@@ -120,8 +120,8 @@ class Settings(BaseSettings):
     #    turns — a single pathological turn can overshoot it. The wall-clock
     #    timeout is therefore the hard guarantee; these two are defense-in-depth.
     brain_timeout_s: int = Field(default=600, alias="BRAIN_TIMEOUT_S")
-    brain_max_turns: int = Field(default=40, alias="BRAIN_MAX_TURNS")
-    brain_max_budget_usd: float = Field(default=5.0, alias="BRAIN_MAX_BUDGET_USD")
+    brain_max_turns: int = Field(default=0, alias="BRAIN_MAX_TURNS")
+    brain_max_budget_usd: float = Field(default=0.0, alias="BRAIN_MAX_BUDGET_USD")
 
     slack_allowed_channels: str = Field(default="", alias="SLACK_ALLOWED_CHANNELS")
 
