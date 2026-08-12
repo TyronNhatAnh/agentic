@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     #    (one live run in N did not cut), and max_budget_usd is checked *between*
     #    turns — a single pathological turn can overshoot it. The wall-clock
     #    timeout is therefore the hard guarantee; these two are defense-in-depth.
-    brain_timeout_s: int = Field(default=600, alias="BRAIN_TIMEOUT_S")
+    brain_timeout_s: int = Field(default=1200, alias="BRAIN_TIMEOUT_S")
     brain_max_turns: int = Field(default=0, alias="BRAIN_MAX_TURNS")
     brain_max_budget_usd: float = Field(default=0.0, alias="BRAIN_MAX_BUDGET_USD")
 
