@@ -106,6 +106,7 @@ def _to_ns(expr: str) -> str:
 # and the model has no way to know the range is too wide until it has already burned
 # the call. The brain walks `since`/`until` back a window at a time to go further.
 _MAX_SPAN_NS = 2 * 3600 * 1_000_000_000
+_SPAN_SLACK_NS = 5 * 1_000_000_000
 
 
 def _clamp_span(start_ns: str, end_ns: str) -> tuple[str, str, str]:
@@ -116,7 +117,10 @@ def _clamp_span(start_ns: str, end_ns: str) -> tuple[str, str, str]:
     """
     start, end = int(start_ns), int(end_ns)
     span = end - start
-    if span <= _MAX_SPAN_NS:
+    # `since` and `until` are resolved by separate time.time_ns() calls, so an
+    # exact `now-2h`→`now` lands microseconds over the cap. Without slack the
+    # most ordinary query at the limit gets a bogus "narrowed 2.0h → 2h" note.
+    if span <= _MAX_SPAN_NS + _SPAN_SLACK_NS:
         return start_ns, end_ns, ""
     clamped = end - _MAX_SPAN_NS
     asked_h = span / 3_600_000_000_000

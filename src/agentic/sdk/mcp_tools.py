@@ -411,10 +411,11 @@ async def github_list_notifications(args: dict[str, Any]) -> dict[str, Any]:
         "It does NOT support code/branch qualifiers like `head:` or `base:` (→ HTTP 422). "
         "To find the PR for a branch, search free-text on the ticket key "
         "(e.g. `repo:owner/name is:pr KRP-1234 in:title`); resolve `owner/name` via "
-        "`list_services` first — never guess the slug. There are exactly two orgs: "
-        "`gogovan` (the Go `ggx-kr-*` services) and `gogovan-korea` (the Java web-*, "
-        "api-layer, node-message). An invented org like `gogox-tech` returns 422, not "
-        "an empty result — 422 usually means a bad qualifier or a nonexistent org."
+        "`list_services` first — never guess the slug. Repos live under exactly two "
+        "orgs, `gogovan` and `gogovan-korea`, and which one is not predictable from "
+        "the service's language or kind — `list_services` has the real `owner/name`. "
+        "An org that doesn't exist returns 422, not an empty result, so a 422 means a "
+        "bad qualifier or a made-up owner rather than 'no matches'."
     ),
     {
         "type": "object",

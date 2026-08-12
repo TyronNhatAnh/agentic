@@ -33,9 +33,16 @@ def test_prompt_doc_paths_are_absolute_and_real(name):
             assert (DOCS_DIR / doc).is_file()
 
 
-def test_brain_prompt_points_at_capabilities_map():
-    assert str(DOCS_DIR / "CAPABILITIES.md") in load_prompt("brain_sdk")
-    assert (DOCS_DIR / "CAPABILITIES.md").is_file()
+def test_brain_prompt_carries_no_dead_doc_path():
+    """Every absolute docs path the prompt hands the brain must resolve. This is
+    the whole failure mode: a path that reads fine and points at nothing."""
+    import re
+
+    text = load_prompt("brain_sdk") + load_prompt("review")
+    paths = set(re.findall(rf"{re.escape(str(DOCS_DIR))}/[A-Za-z0-9_/.-]+\.md", text))
+    assert paths, "prompt should reference at least one doc"
+    missing = [p for p in paths if not Path(p).is_file()]
+    assert not missing, f"prompt points at nonexistent docs: {missing}"
 
 
 # --- 2x Loki TIMEOUT on now-24h / now-7d ------------------------------------
@@ -59,6 +66,21 @@ def test_clamp_span_boundary_is_not_clamped():
     end = 1_000_000 * _H
     _, _, note = _clamp_span(str(end - _MAX_SPAN_NS), str(end))
     assert note == ""
+
+
+def test_clamp_span_tolerates_the_drift_between_two_now_reads():
+    """`since` and `until` resolve via separate time.time_ns() calls, so an exact
+    `now-2h`→`now` lands just over the cap and used to report a bogus 2h→2h
+    narrowing (seen live)."""
+    end = 1_000_000 * _H
+    _, _, note = _clamp_span(str(end - _MAX_SPAN_NS - 3_000_000), str(end))
+    assert note == ""
+
+
+def test_clamp_span_still_clamps_past_the_slack():
+    end = 1_000_000 * _H
+    s, _, note = _clamp_span(str(end - _MAX_SPAN_NS - 10 * 60 * 1_000_000_000), str(end))
+    assert note and int(end) - int(s) == _MAX_SPAN_NS
 
 
 # --- 1x "Remote origin is not a github URL that can be rewritten" -----------
