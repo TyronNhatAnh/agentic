@@ -313,6 +313,17 @@ async def run_brain_session(
             )
         else:
             error = result_msg.result or result_msg.stop_reason or "result_error"
+            # Bare "result_error" (both fields empty) is undiagnosable after the
+            # fact — one turn logged exactly that and left nothing to go on. Dump
+            # what the ResultMessage did carry.
+            log.error(
+                "brain result error thread=%s stop=%s subtype=%s turns=%s "
+                "cost=%s session=%s result=%r",
+                thread_ts, result_msg.stop_reason,
+                getattr(result_msg, "subtype", None), result_msg.num_turns,
+                result_msg.total_cost_usd, session_id,
+                (result_msg.result or "")[:500],
+            )
     if session_id:
         try:
             update_thread_fields(thread_ts, sdk_session_id=session_id)
