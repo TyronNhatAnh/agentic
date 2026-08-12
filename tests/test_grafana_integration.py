@@ -91,7 +91,10 @@ def test_empty_result_surfaces_window_and_widen_hint():
     )
     assert "now-1h" in out  # exact window echoed, not "khoảng thời gian này"
     assert "≠ no error" in out  # absence-of-evidence guard
-    assert "now-24h" in out or "nới" in out  # widen suggestion
+    # Widen suggestion, but never past the 2h span cap — `now-24h` would just be
+    # clamped back, so naming it here sent the brain into the cap.
+    assert "widen" in out and "2h cap" in out
+    assert "now-24h" not in out
 
 
 _SVC = {"name": "payment-service", "loki_selector": '{job="kr-{env}/argo-ggx-kr-payment-service"}'}

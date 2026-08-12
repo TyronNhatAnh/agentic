@@ -12,6 +12,7 @@ import pytest
 from claude_agent_sdk import (
     AssistantMessage,
     ResultMessage,
+    StreamEvent,
     TextBlock,
     ToolUseBlock,
 )
@@ -79,6 +80,20 @@ class FakePool:
 
 def _assistant(*blocks):
     return AssistantMessage(content=list(blocks), model="claude-opus-5")
+
+
+def _delta(text, parent_tool_use_id=None):
+    """A token-level text delta as the SDK wraps it when include_partial_messages
+    is on (`event` is the raw Anthropic stream event)."""
+    return StreamEvent(
+        uuid="u1",
+        session_id="sess-e2e",
+        event={
+            "type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": text},
+        },
+        parent_tool_use_id=parent_tool_use_id,
+    )
 
 
 def _result(text="final answer", **kw):
@@ -198,6 +213,37 @@ async def test_stall_after_partial_prose_keeps_the_text_and_adds_elapsed():
     assert stalled, slack.updates
     # The partial answer must survive the heartbeat edit, not be replaced by it.
     assert all(u.startswith("Half an answer.") for u in stalled)
+
+
+async def test_token_deltas_type_the_answer_out_live():
+    """With include_partial_messages the SDK emits StreamEvents before the
+    AssistantMessage lands — the placeholder must grow token by token."""
+    slack = FakeSlack()
+    script = [
+        (0, _delta("Hel")),
+        (0.02, _delta("lo wor")),
+        (0.02, _delta("ld")),
+        (0, _assistant(TextBlock("Hello world"))),
+        (0, _result("Hello world")),
+    ]
+    await _run(script, slack, "T_delta")
+
+    prose = [u for u in slack.updates if "waiting" not in u]
+    assert prose[0].startswith("Hel")
+    assert any(u.startswith("Hello wor") for u in prose)
+
+
+async def test_subagent_deltas_do_not_leak_into_the_placeholder():
+    slack = FakeSlack()
+    script = [
+        (0, _delta("dev agent chatter", parent_tool_use_id="t1")),
+        (0.02, _delta("real answer")),
+        (0, _result("real answer")),
+    ]
+    await _run(script, slack, "T_subdelta")
+
+    assert not any("chatter" in u for u in slack.updates)
+    assert any(u.startswith("real answer") for u in slack.updates)
 
 
 async def test_identical_content_is_not_re_pushed():

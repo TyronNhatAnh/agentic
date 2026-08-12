@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     grafana_sa_kr: str = Field(default="", alias="GRAFANA_SA_KR")
     grafana_sa_user: str = Field(default="grafana-sa-kr", alias="GRAFANA_SA_USER")
 
+    # Path to the jlog.sh wrapper (java_logs). Empty = the default skill-dir path.
+    # Needs to be a Settings field, not just os.environ: nothing loads `.env` into
+    # the process env, so an env_file-only knob would silently do nothing.
+    jlog_script: str = Field(default="", alias="JLOG_SCRIPT")
+
     jira_base_url: str = Field(default="", alias="JIRA_BASE_URL")
     jira_email: str = Field(default="", alias="JIRA_EMAIL")
     jira_api_token: str = Field(default="", alias="JIRA_API_TOKEN")

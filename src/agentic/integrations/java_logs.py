@@ -17,6 +17,7 @@ import shutil
 import signal
 from pathlib import Path
 
+from ..config import settings
 from .result import ToolResult
 
 # Lives in the Claude Code skill dir, not this repo — the bot and the skill share
@@ -39,7 +40,8 @@ _MAX_CHARS = 12000
 
 
 def _script() -> Path:
-    return Path(os.environ.get("JLOG_SCRIPT") or _DEFAULT_SCRIPT)
+    # os.environ first so a shell/service-manager export still wins over `.env`.
+    return Path(os.environ.get("JLOG_SCRIPT") or settings.jlog_script or _DEFAULT_SCRIPT)
 
 
 # `file` and `kst` are interpolated *unquoted* into the command jlog.sh sends over

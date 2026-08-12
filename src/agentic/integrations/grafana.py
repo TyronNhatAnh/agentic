@@ -185,7 +185,9 @@ def _format_streams(
         widen = (
             "move `since`/`until` back another 2h (the span is capped, widening is a no-op)"
             if clamped
-            else "widen `since` (e.g. `now-6h`/`now-24h`)"
+            # Not `now-24h`: that gets clamped straight back to 2h, so the advice
+            # would send the brain into the cap instead of past it.
+            else "widen `since` up to the 2h cap (e.g. `now-2h`), then move the window back"
         )
         return (
             f"_0 lines matched `{query}` ({env}) in `{since}`→`{until}`._\n"

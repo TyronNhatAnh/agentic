@@ -51,6 +51,11 @@ REVIEW_ALLOWED_TOOLS: list[str] = [
     "Grep",
     "mcp__agentic__github_get_pr",
     "mcp__agentic__github_get_pr_diff",
+    # review.md tells the agent to Read/Grep the PR head from a dedicated review
+    # worktree rather than whatever checkout exists locally; without this it can
+    # only see the (possibly truncated) diff text and would approve on that.
+    # Read-only: prepares a worktree, no commit/push.
+    "mcp__agentic__git_prepare_pr_review_workspace",
 ]
 
 def build_subagents() -> dict[str, AgentDefinition]:

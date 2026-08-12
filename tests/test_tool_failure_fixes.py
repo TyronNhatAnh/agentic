@@ -58,6 +58,31 @@ def test_tool_descriptions_carry_no_relative_doc_path():
         )
 
 
+def test_review_agent_owns_every_mcp_tool_its_prompt_names():
+    """review.md told it to call git_prepare_pr_review_workspace, which wasn't in
+    its allowlist — so it could only ever see the (truncatable) diff text."""
+    import re
+
+    from agentic.sdk.sub_agents import REVIEW_ALLOWED_TOOLS
+
+    text = load_prompt("review")
+    named = set(re.findall(r"`(git_[a-z_]+|github_[a-z_]+|grafana_[a-z_]+)\(", text))
+    missing = {t for t in named if f"mcp__agentic__{t}" not in REVIEW_ALLOWED_TOOLS}
+    assert not missing, f"review prompt calls tools it cannot use: {missing}"
+
+
+def test_jlog_script_override_is_reachable_from_dotenv(monkeypatch):
+    """Nothing loads `.env` into os.environ, so a knob read only from os.environ
+    would be dead for every user who configures it the documented way."""
+    from agentic.config import settings
+
+    monkeypatch.delenv("JLOG_SCRIPT", raising=False)
+    monkeypatch.setattr(settings, "jlog_script", "/tmp/from-dotenv.sh")
+    assert str(jl._script()) == "/tmp/from-dotenv.sh"
+    monkeypatch.setenv("JLOG_SCRIPT", "/tmp/from-shell.sh")
+    assert str(jl._script()) == "/tmp/from-shell.sh", "shell export must win"
+
+
 # --- 2x Loki TIMEOUT on now-24h / now-7d ------------------------------------
 
 def test_clamp_span_leaves_short_window_untouched():

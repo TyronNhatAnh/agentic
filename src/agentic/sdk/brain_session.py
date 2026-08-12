@@ -18,6 +18,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ResultMessage,
+    StreamEvent,
     TextBlock,
     ToolUseBlock,
 )
@@ -116,6 +117,10 @@ def make_brain_options_factory(
             # Default Opus for reasoning quality; tunable via BRAIN_MODEL if cost
             # matters more than depth on a given deployment.
             model=settings.brain_model,
+            # Token-level StreamEvents → the placeholder types the reply out live.
+            # Without this the stream only ticks per finished AssistantMessage, so a
+            # tool-heavy turn shows nothing but the tool/heartbeat line until the end.
+            include_partial_messages=True,
             permission_mode="default",
             # SDK-native circuit breakers — the agent loop stops itself before the
             # wall-clock deadline in run_brain_session fires. 0 → leave unset
@@ -225,6 +230,9 @@ async def run_brain_session(
     ))
 
     text_parts: list[str] = []
+    # Token deltas, display-only. text_parts stays the authoritative reply text —
+    # partial events can be dropped/reordered, ResultMessage.result can't.
+    live: list[str] = []
     progress = _Progress(slack_client, channel_id, placeholder_ts, t_start)
     tool_use_count = 0
     last_tool_label = ""
@@ -245,18 +253,30 @@ async def run_brain_session(
     try:
         async with asyncio.timeout(deadline):
             async for msg in client.receive_response():
-                if isinstance(msg, AssistantMessage):
+                if isinstance(msg, StreamEvent):
+                    # Main-agent text deltas only — sub-agent streams carry
+                    # parent_tool_use_id and would interleave into the placeholder.
+                    if msg.parent_tool_use_id:
+                        continue
+                    ev = msg.event or {}
+                    if ev.get("type") == "content_block_delta":
+                        delta = ev.get("delta") or {}
+                        if delta.get("type") == "text_delta" and delta.get("text"):
+                            live.append(delta["text"])
+                            await progress.render("".join(live))
+                elif isinstance(msg, AssistantMessage):
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
                             text_parts.append(block.text)
                         elif isinstance(block, ToolUseBlock):
                             tool_use_count += 1
                             last_tool_label = _tool_label(block.name)
-                    # Stream the brain's prose once it starts; until then surface
-                    # tool activity so the placeholder reflects progress instead of
-                    # freezing on the initial "Processing…" for the whole tool phase
-                    # (the brain front-loads Loki/GitHub/git calls before writing).
-                    view = "".join(text_parts) or _tool_progress(
+                    # Token deltas already drive the view when they arrive; this is
+                    # the fallback for a turn without partials. Until any prose
+                    # exists, surface tool activity so the placeholder isn't frozen
+                    # for the whole tool phase (the brain front-loads Loki/GitHub/git
+                    # calls before writing).
+                    view = "".join(live) or "".join(text_parts) or _tool_progress(
                         last_tool_label, tool_use_count
                     )
                     await progress.render(view)
