@@ -8,6 +8,7 @@ until Phase 3 collapses dev into AgentDefinition.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
@@ -296,6 +297,7 @@ async def run_brain_session(
     finally:
         stop_heartbeat.set()
         await asyncio.gather(heartbeat, return_exceptions=True)
+        await progress.aclose()
 
     # The pooled client's in-flight receive_response generator is left pending on a
     # timeout — reusing it next turn would interleave two streams. Discard it; the
@@ -441,20 +443,52 @@ class _Progress:
         self._lock = asyncio.Lock()
         self._last_edit = 0.0
         self._last_rendered = ""
+        self._pending = ""
+        self._flush: asyncio.Task | None = None
 
     async def render(self, view: str) -> None:
-        """Stream edit — skipped when the content hasn't changed or we edited
-        within the debounce window."""
+        """Stream edit, debounced with a trailing flush."""
         async with self._lock:
             now = time.monotonic()
-            if (
-                not view
-                or view == self._last_rendered
-                or now - self._last_edit < _STREAM_EDIT_INTERVAL_S
-            ):
+            if not view or view == self._last_rendered:
+                return
+            wait = _STREAM_EDIT_INTERVAL_S - (now - self._last_edit)
+            if wait > 0:
+                # Hold the newest view instead of dropping it: the stream usually
+                # stops right after a sentence (the model goes off to call a tool),
+                # so a dropped view leaves Slack showing the first token until the
+                # turn ends — "I" for the whole tool call.
+                self._pending = view
+                if self._flush is None or self._flush.done():
+                    self._flush = asyncio.create_task(self._flush_pending(wait))
                 return
             await self._push(view, now)
             self._last_rendered = view
+            self._pending = ""
+
+    async def _flush_pending(self, wait: float) -> None:
+        while True:
+            await asyncio.sleep(wait)
+            async with self._lock:
+                view = self._pending
+                if not view or view == self._last_rendered:
+                    self._pending = ""
+                    return
+                wait = _STREAM_EDIT_INTERVAL_S - (time.monotonic() - self._last_edit)
+                if wait > 0:  # a render or the heartbeat pushed meanwhile
+                    continue
+                await self._push(view, time.monotonic())
+                self._last_rendered = view
+                self._pending = ""
+                return
+
+    async def aclose(self) -> None:
+        """Drop any scheduled flush. The caller writes the final reply into this
+        same message right after the turn, and a late partial would overwrite it."""
+        if self._flush and not self._flush.done():
+            self._flush.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._flush
 
     async def render_heartbeat(self) -> None:
         """Elapsed-time edit, only when the placeholder has gone stale. Keeps

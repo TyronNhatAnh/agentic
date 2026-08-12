@@ -233,6 +233,28 @@ async def test_token_deltas_type_the_answer_out_live():
     assert any(u.startswith("Hello wor") for u in prose)
 
 
+async def test_debounced_tokens_still_land_when_the_stream_pauses(monkeypatch):
+    """The debounce must hold the newest view, not drop it. Real repro: the model
+    types "I'll check." then goes off to run a tool for 2s — every token after the
+    first landed inside the debounce window, so Slack sat on "I'll" the whole time.
+    Uses an interval far larger than the gaps between deltas, which the compressed
+    fixture timings (0.01s vs 0.02s deltas) never exercise."""
+    monkeypatch.setattr(bs, "_STREAM_EDIT_INTERVAL_S", 0.15)
+    # Keep the production ordering (1.5s stream vs 20s heartbeat): the fixture's
+    # compressed 0.05s heartbeat would keep resetting the shared edit clock.
+    monkeypatch.setattr(bs, "_HEARTBEAT_INTERVAL_S", 5)
+    slack = FakeSlack()
+    script = [
+        (0, _delta("I'll ")),        # leading edge — pushed immediately
+        (0.01, _delta("check.")),    # inside the window
+        (0.6, _result("done")),      # the model is busy in a tool; nothing streams
+    ]
+    await _run(script, slack, "T_trailing")
+
+    prose = [u for u in slack.updates if "waiting" not in u]
+    assert any(u.startswith("I'll check.") for u in prose), prose
+
+
 async def test_subagent_deltas_do_not_leak_into_the_placeholder():
     slack = FakeSlack()
     script = [
