@@ -2,7 +2,9 @@ import logging
 import re
 import time
 from collections import OrderedDict
+from pathlib import Path
 
+import httpx
 from slack_bolt.async_app import AsyncApp
 
 from .config import settings
@@ -38,6 +40,25 @@ _channel_name_cache: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
 # uid -> (display_name, email, fetched_at)
 _user_info_cache: "OrderedDict[str, tuple[str | None, str | None, float]]" = OrderedDict()
 _bot_user_id_cache: dict[str, str | None] = {}
+
+# Attachment inlining (needs the `files:read` scope).
+_ATTACH_MAX_CHARS = 20_000  # per file, before it eats the whole context window
+_ATTACH_MAX_FILES = 5  # per message
+_ATTACH_MAX_FILES_HISTORY = 6  # across the whole thread backfill
+_ATTACH_TIMEOUT_S = 15
+_ATTACH_MIN_USEFUL_CHARS = 500  # below this, say it was dropped instead of teasing
+# Room for the fences/labels this module adds around each attachment.
+_ATTACH_BUDGET_MARGIN = 500
+_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+_IMAGE_MAX_BYTES = 10_000_000  # Claude rejects images past ~10MB
+_TEXTUAL_MIMETYPES = {
+    "application/json",
+    "application/sql",
+    "application/x-sh",
+    "application/xml",
+    "application/javascript",
+    "application/x-yaml",
+}
 
 
 def _cache_put(cache: OrderedDict, key: str, value: tuple) -> None:
@@ -163,6 +184,178 @@ def _chunks(text: str, limit: int = _SLACK_CHUNK_LEN) -> list[str]:
     return chunks
 
 
+async def _download(
+    client, f: dict, *, max_bytes: int, partial_ok: bool
+) -> tuple[bytes | None, str]:
+    """Authenticated fetch of a Slack file via `url_private`, streamed and cut off
+    at `max_bytes` — Slack's `size` metadata is a hint, not a guarantee, and a
+    fully-buffered upload is unbounded memory in a long-lived process. Text can
+    keep the prefix (`partial_ok`); a half-downloaded image is useless."""
+    url = f.get("url_private_download") or f.get("url_private")
+    if not url:
+        return None, "no download url"
+    token = getattr(client, "token", None) or settings.slack_bot_token
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        async with httpx.AsyncClient(timeout=_ATTACH_TIMEOUT_S) as http:
+            async with http.stream(
+                "GET",
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                follow_redirects=True,
+            ) as resp:
+                if resp.status_code != 200:
+                    return None, f"HTTP {resp.status_code}"
+                ctype = (resp.headers.get("content-type") or "").lower()
+                # Slack answers an unauthorized download with 200 + its sign-in page.
+                if ctype.startswith("text/html") and not (
+                    f.get("mimetype") or ""
+                ).startswith("text/html"):
+                    return None, "missing files:read scope (got Slack login page)"
+                async for chunk in resp.aiter_bytes(_DOWNLOAD_CHUNK_BYTES):
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total >= max_bytes:
+                        if not partial_ok:
+                            return None, f"larger than {max_bytes // 1_000_000}MB"
+                        break
+    except Exception as e:
+        return None, f"download failed: {e}"
+    return b"".join(chunks)[:max_bytes], ""
+
+
+async def _file_info(client, f: dict) -> tuple[dict, str]:
+    """Merge `files.info` into the event's file stub — the event payload can omit
+    `url_private`, and snippets carry their body inline as `content`."""
+    fid = f.get("id")
+    if not fid:
+        return f, ""
+    try:
+        info = (await client.files_info(file=fid)).get("file") or {}
+    except Exception as e:
+        data = getattr(getattr(e, "response", None), "data", None) or {}
+        detail = data.get("error") if isinstance(data, dict) else None
+        return f, detail or str(e)
+    return {**f, **info}, ""
+
+
+async def _file_content(client, f: dict, char_budget: int) -> tuple[str | None, str]:
+    if f.get("content"):
+        return f["content"], ""
+    # UTF-8 is at most 4 bytes/char, so this is the most that can survive the
+    # char budget — anything past it would be truncated away regardless.
+    raw, err = await _download(
+        client, f, max_bytes=char_budget * 4, partial_ok=True
+    )
+    if raw is None:
+        return None, err
+    return raw.decode("utf-8", errors="replace"), ""
+
+
+def _save_image(client_id: str, name: str, raw: bytes) -> str:
+    """Persist an image where the brain's Read can reach it. Old files are pruned
+    here rather than on a timer — attachments only arrive through this path."""
+    directory = Path(settings.attachment_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - settings.attachment_ttl_h * 3600
+    for old in directory.iterdir():
+        try:
+            if old.is_file() and old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[-60:] or "image"
+    path = directory / f"{client_id}-{safe}"
+    path.write_bytes(raw)
+    return str(path)
+
+
+def _is_textual(f: dict) -> bool:
+    mimetype = (f.get("mimetype") or "").lower()
+    return (
+        mimetype.startswith("text/")
+        or mimetype in _TEXTUAL_MIMETYPES
+        or f.get("mode") in ("snippet", "post")
+    )
+
+
+async def _render_image(client, f: dict, name: str) -> str:
+    """Images go to disk and the brain gets the path — it opens them with Read
+    only if the question needs the picture, so a screenshot costs nothing on the
+    turns that ignore it (and no base64 lands in the session transcript)."""
+    size = f.get("size") or 0
+    if size and size > _IMAGE_MAX_BYTES:
+        return f'[image "{name}" — {size // 1_000_000}MB, too large to attach]'
+    raw, err = await _download(
+        client, f, max_bytes=_IMAGE_MAX_BYTES, partial_ok=False
+    )
+    if raw is None:
+        log.warning("image %s unreadable: %s", name, err)
+        return f'[image "{name}" could not be read: {err}]'
+    try:
+        path = _save_image(f.get("id") or "img", name, raw)
+    except OSError as e:
+        log.warning("image %s could not be saved: %s", name, e)
+        return f'[image "{name}" could not be saved: {e}]'
+    return f'[image "{name}" saved at {path} — open it with Read to see it]'
+
+
+async def _render_files(
+    client, message: dict, max_files: int, char_budget: int
+) -> tuple[str, int]:
+    """Inline text uploads — they never appear in `message["text"]`, so a snippet
+    of SQL/log/diff would otherwise reach the brain as a request pointing at
+    content it can't see. Unreadable ones are announced, never dropped silently.
+
+    `char_budget` is what's left of the caller's downstream limit (dispatcher's
+    `max_input_chars` for the live message, the per-message history cap for the
+    backfill): overshooting it doesn't buy context, it just gets cut off again
+    downstream — and there the tail files vanish whole rather than being trimmed.
+    Returns the rendered text + how many files it consumed from `max_files`."""
+    files = message.get("files") or []
+    if not files or max_files <= 0:
+        return "", 0
+    rendered: list[str] = []
+    remaining = char_budget
+    for stub in files[:max_files]:
+        f, info_err = await _file_info(client, stub)
+        name = f.get("name") or f.get("title") or f.get("id") or "attachment"
+        mimetype = (f.get("mimetype") or "").lower()
+        if info_err:
+            log.warning("attachment %s unreadable: %s", name, info_err)
+            note = f'[attachment "{name}" could not be read: {info_err}]'
+        elif mimetype.startswith("image/"):
+            # A path costs ~100 chars and the picture itself is read out-of-band,
+            # so images don't draw on the text budget.
+            note = await _render_image(client, f, name)
+        elif not _is_textual(f):
+            kind = mimetype or f.get("filetype") or "unknown type"
+            note = f'[attachment "{name}" ({kind}) — not text, not read]'
+        else:
+            per_file = min(_ATTACH_MAX_CHARS, remaining)
+            if per_file < _ATTACH_MIN_USEFUL_CHARS:
+                note = f'[attachment "{name}" not included — no context budget left]'
+            else:
+                note, used = await _render_text_file(client, f, name, per_file)
+                remaining -= used
+        rendered.append(note)
+    return "\n\n".join(rendered), min(len(files), max_files)
+
+
+async def _render_text_file(
+    client, f: dict, name: str, char_cap: int
+) -> tuple[str, int]:
+    body, err = await _file_content(client, f, char_cap)
+    if body is None:
+        log.warning("attachment %s unreadable: %s", name, err)
+        return f'[attachment "{name}" could not be read: {err}]', 0
+    if len(body) > char_cap:
+        body = body[:char_cap] + f"\n…[attachment truncated at {char_cap} chars]"
+    lang = f.get("filetype") or ""
+    return f'attachment "{name}":\n```{lang}\n{body}\n```', len(body)
+
+
 async def _fetch_thread_history(
     client,
     channel: str,
@@ -200,7 +393,7 @@ async def _fetch_thread_history(
         current_ts_f = float(current_ts)
     except (TypeError, ValueError):
         current_ts_f = None
-    history: list[dict] = []
+    kept: list[tuple[dict, str]] = []
     for m in resp.get("messages") or []:
         msg_ts = m.get("ts")
         if msg_ts == current_ts:
@@ -212,11 +405,29 @@ async def _fetch_thread_history(
             except (TypeError, ValueError):
                 pass
         text = await _resolve_mentions(client, m.get("text") or "", bot_user_id)
+        if text or m.get("files"):
+            kept.append((m, text))
+    kept = kept[-10:]
+
+    # Attachments are read newest-first: the file budget must land on the message
+    # most likely to be the one being asked about, not on the oldest in the window.
+    budget = _ATTACH_MAX_FILES_HISTORY
+    history: list[dict] = []
+    for m, text in reversed(kept):
+        attachments, used = await _render_files(
+            client,
+            m,
+            budget,
+            settings.brain_history_msg_cap_chars - len(text) - _ATTACH_BUDGET_MARGIN,
+        )
+        budget -= used
+        if attachments:
+            text = f"{text}\n\n{attachments}" if text else attachments
         if not text:
             continue
-        role = "assistant" if m.get("bot_id") else "user"
-        history.append({"role": role, "text": text})
-    return history[-10:]
+        history.append({"role": "assistant" if m.get("bot_id") else "user", "text": text})
+    history.reverse()
+    return history
 
 
 async def _channel_name(client, channel_id: str) -> str | None:
@@ -272,6 +483,14 @@ def register(
 
         bot_uid = await _bot_user_id(client)
         text = await _resolve_mentions(client, raw, bot_uid)
+        attachments, _ = await _render_files(
+            client,
+            event,
+            _ATTACH_MAX_FILES,
+            settings.max_input_chars - len(text) - _ATTACH_BUDGET_MARGIN,
+        )
+        if attachments:
+            text = f"{text}\n\n{attachments}" if text else attachments
 
         if not text:
             await client.chat_postMessage(

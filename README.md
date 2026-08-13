@@ -34,7 +34,10 @@ legacy `claude -p` subprocess path was removed 2026-05-30).
 ## Prerequisites
 
 1. **Claude CLI** installed and authenticated: `claude login`. Verify with `claude --version`.
-2. **Slack app** with Socket Mode enabled. Bot scopes: `app_mentions:read`, `chat:write`.
+2. **Slack app** with Socket Mode enabled. Bot scopes: `app_mentions:read`, `chat:write`,
+   `files:read` (reads snippets/images posted in the thread — without it those uploads
+   reach the brain as `could not be read`). Adding a scope to an existing app requires
+   reinstalling it to the workspace.
    Subscribe to the `app_mention` event (DMs are intentionally ignored). Generate an
    **app-level token** with `connections:write`.
 3. Python 3.11+.

@@ -1,3 +1,6 @@
+import tempfile
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -79,6 +82,14 @@ class Settings(BaseSettings):
 
     workspace_dir: str = Field(default="", alias="WORKSPACE_DIR")
     worktree_dir: str = Field(default="", alias="WORKTREE_DIR")
+    # Where Slack image uploads land so the brain can Read them. Constant, and
+    # added to the session's readable roots — a per-thread path would churn the
+    # add_dirs prefix.
+    attachment_dir: str = Field(
+        default_factory=lambda: str(Path(tempfile.gettempdir()) / "agentic-attachments"),
+        alias="ATTACHMENT_DIR",
+    )
+    attachment_ttl_h: int = Field(default=48, alias="ATTACHMENT_TTL_H")
     services_seed_path: str = Field(default="", alias="AGENTIC_SERVICES_JSON")
     base_branch_template: str = Field(
         default="releases/DAPro-2.{sprint}", alias="BASE_BRANCH_TEMPLATE"

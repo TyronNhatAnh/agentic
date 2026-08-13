@@ -176,7 +176,13 @@ def _session_dirs(row: dict, policy: WorkspacePolicy) -> tuple[str | None, list[
 
     ``policy.repo_roots`` adds tier-specific readable roots — empty for prod, but
     a future channel could pin its own repo here so Read/Glob/Grep can reach it."""
-    roots = [d for d in (settings.workspace_dir, settings.worktree_dir) if d]
+    # Slack image uploads live here; without it Read can't reach the path the
+    # user's screenshot was saved to.
+    roots = [
+        d
+        for d in (settings.workspace_dir, settings.worktree_dir, settings.attachment_dir)
+        if d
+    ]
     roots.extend(r for r in policy.repo_roots if r)
     worktree = (row.get("active_worktree") or "").strip()
     if worktree and os.path.isdir(worktree) and worktree not in roots:

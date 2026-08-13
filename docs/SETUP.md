@@ -34,8 +34,11 @@ Bot chạy **Socket Mode** nên cần 2 token: bot token (`xoxb-`) và app-level
 
 1. Tạo app tại <https://api.slack.com/apps> → **From scratch**.
 2. **Socket Mode** → bật ON.
-3. **OAuth & Permissions** → Bot Token Scopes tối thiểu: `app_mentions:read`, `chat:write`.
+3. **OAuth & Permissions** → Bot Token Scopes tối thiểu: `app_mentions:read`, `chat:write`,
+   `files:read` (đọc snippet/ảnh user paste trong thread — thiếu scope này thì mọi
+   upload tới brain đều là `could not be read`).
    Cài app vào workspace → copy **Bot User OAuth Token** (`xoxb-...`).
+   App đã cài sẵn mà thêm scope thì phải **Reinstall to Workspace**, token cũ không tự có scope mới.
 4. **Event Subscriptions** → bật, subscribe bot event `app_mention`. (DM bị cố tình bỏ qua.)
 5. **Basic Information → App-Level Tokens** → tạo token scope `connections:write` →
    copy (`xapp-...`).
