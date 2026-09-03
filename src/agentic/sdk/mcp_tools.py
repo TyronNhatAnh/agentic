@@ -1153,9 +1153,10 @@ async def java_logs(args: dict[str, Any]) -> dict[str, Any]:
             file=args.get("file", ""),
             node=args.get("node", ""),
         ),
-        # Read-only, but a retry re-pulls megabytes across the VPN off a prod box;
-        # the integration already marks the one worth retrying (a node that errored).
-        retryable_read=False, service="Java logs",
+        # A retry re-pulls megabytes off a prod box, so only rc==3 (one node errored,
+        # making an empty result meaningless) sets retryable; TIMEOUT and AUTH stay
+        # non-retryable in the integration.
+        retryable_read=True, service="Java logs",
     )
 
 

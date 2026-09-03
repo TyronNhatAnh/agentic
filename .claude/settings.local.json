@@ -17,7 +17,8 @@
       "Skill(update-config:*)",
       "Skill(dataviz)",
       "Skill(dataviz:*)",
-      "WebFetch(domain:claude.ai)"
+      "WebFetch(domain:claude.ai)",
+      "Bash(~/.claude/skills/prod-db-query/query.sh \"SHOW TABLES LIKE '%evice%'\")"
     ],
     "deny": [
       "Read(//Users/tyron/Projects/agentic/.env)",

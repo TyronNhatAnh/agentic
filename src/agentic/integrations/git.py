@@ -260,9 +260,13 @@ async def latest_release_branch(service: str | None = None,
     )
     lines = [l for l in out.splitlines() if l.strip()]
     if rc != 0 or not lines:
+        # Not every repo follows the release-branch flow (infra/UI repos ship off
+        # their default branch); say so, or the brain reads this as a broken lookup.
         return ToolResult.failure(
             "NOT_FOUND",
-            f"No `releases/*` branch found on origin of `{svc['name']}`.",
+            f"No `releases/*` branch found on origin of `{svc['name']}` — this repo "
+            "likely does not use the release-branch flow. Read its default branch "
+            "instead of treating this as a failure.",
         )
     parts = lines[0].split("\t")
     branch = parts[0].removeprefix("origin/")
@@ -673,7 +677,10 @@ async def prepare_read_workspace(service: str | None = None, repo: str | None = 
         lines = [l for l in out.splitlines() if l.strip()]
         if rc != 0 or not lines:
             return ToolResult.failure(
-                "NOT_FOUND", f"No `releases/*` branch found on origin of `{svc['name']}`.",
+                "NOT_FOUND",
+                f"No `releases/*` branch found on origin of `{svc['name']}` — this repo "
+                "likely does not use the release-branch flow. Re-call with an explicit "
+                "`ref` (its default branch, e.g. `master` or `main`).",
             )
         parts = lines[0].split("\t")
         target_ref = parts[0].removeprefix("origin/")
