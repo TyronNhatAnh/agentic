@@ -42,7 +42,10 @@ business backend may also be a producer of this topic (see web-api detail).
 `orderrequest`, `orderamount`, `orderhist`, `orderflag`, `orderetax`, `orderowner`,
 `orderpool`, `waypoint`, `zoneprice`, `coupon`, `appliedcoupon`, `extraprice`,
 `specialprice`, `goodsinfo`, `region`. Read/write/replica DB split. See
-[DB_TABLES.md](../DB_TABLES.md) for naming.
+[DB_TABLES.md](../DB_TABLES.md) for naming and, for `orderhist`, for the snapshot
+shape — it is the append-only per-change snapshot of an order (`Meta.AmountList`
+carries the money at that instant), so it is the only way to answer *when did this
+amount change and who changed it*; `orderamount` alone gives just the current value.
 
 ## Core flows
 - **Submit → dispatch:** submit handler persists `orderrequest`/`orderamount`/

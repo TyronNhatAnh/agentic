@@ -41,6 +41,15 @@ have a legacy path and a Go path live at the same time — check which one the d
 - Data: **Postgres** `payment_request`/`card_payment` (NOT `gogovan` MySQL); Toss Payments.
 - Watch: payment→order `POST /orders/status` after charge; payment→user `/toss/add-card`. Different DB — DB_TABLES.md naming does not apply.
 
+**Driver payout / tax split (기사 운임: 부가세 vs 소득세)** — `order` (**owns the calc**), `user` (tax profile via gRPC), `web-admin` (manual edit + TaxPlayerCD form), `common` (audit log of the profile change)
+- Entry: order `pkg/string_utils/order_utils.go` `GetSocialInsurancePrice` — the only implementation. Call sites: `internal/application/implement/order_new_service.go` (tip + consignment paths), `queries/check_price_driver/check_price_driver_handler.go` (`POST /guest/check-price-driver`, DA), `queries/estimate/estimate_handler.go`. Driver tax context comes from `getDriverContextInsurance` (gRPC → user-service).
+- Rule: `isBusinessTaxPlayer = TaxPlayerCD ∈ DriverEtaxPlayerSupportList {1 CorporationOperator, 2 IndividualCarrier, 5 SimplifiedTaxpayer}`, `hasBizRegistration = BizRegistrationNumber != ""`. VAT when `(isBusinessTaxPlayer && hasBizRegistration) || ExternalVendorId != 0`; income tax when `ExternalVendorId == 0 && (!isBusinessTaxPlayer || !hasBizRegistration)`. **`3 SimpleOperator` and `4 Individual` are NOT in the VAT list** — a driver with a biz number but code 3/4 still gets income tax.
+- Data: `orderamount` with `TargetCD=Driver`, `PriceCD` 30 EngageInsurance / 31 IndustryAccidentInsurance / **32 DriverVAT** / **33 DriverIncomeTax** / 34 PayToDriver / 38 ConsignmentDriverVAT; profile in `business.TaxPlayerCD` + `BizRegistrationNumber`.
+- Watch: the tax split is a **snapshot taken when the fare is computed**, read from the driver's profile at that instant. A driver who registers a business *afterwards* keeps the old split — there is **no recalculation trigger and no recalculate endpoint** anywhere in order-service. This is the source of "I registered but was still charged income tax" tickets.
+- Watch: `check_price_driver` and `estimate` **compute and return, they do not persist**. Only the `order_new_service.go` paths write. Which code writes the split on a plain admin release→reassign is **not resolved** — it is not among those four files, so don't attribute a reassign-time change to `order_utils.go` without tracing it first.
+- Watch: web-admin `DriverController.java:215-216` defaults `TaxPlayerCD` to **4 (Individual)** when null/0, so an unfilled profile renders as "개인" and lands on the income-tax branch.
+- Watch: `orderamount` changes have **no audit log** — the `auditlog` catalog covers only identity/permission entities (see [DB_TABLES.md](../DB_TABLES.md) §Lịch sử). A manual fare fix in admin leaves a trace only in `orderhist`.
+
 **Bank-account (payout) verification** — `driver`, `payment`, `da-api`, `web-admin`
 - Entry: driver `bank_verify_handler.go` → payment `/api/v1/bank-account/verify-holder-real-name`; web-admin `AjaxController:2499+`.
 - Watch: driver/da-api/web-admin all proxy to payment; caller JWT forwarded. Real-name check goes to Toss v2.

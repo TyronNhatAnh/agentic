@@ -52,6 +52,41 @@ Các view `vw*` (`vworderforda`, `vworderlistforadmin`, `vwexport*`…) là view
 sẵn cho DA app / admin / report — khi cần đúng dữ liệu một màn hình đang hiển thị,
 query thẳng view đó thường nhanh hơn tự join lại.
 
+## Lịch sử & truy vết
+
+Bảng ở §Bảng core đều là **current-state**: chúng trả lời "giá trị đang là gì",
+không trả lời "tại sao thành thế". Câu hỏi dạng *tại sao đơn này ra số tiền đó*,
+*ai đổi cái này*, *lúc đó dữ liệu là gì* thì tra hai bảng dưới **trước**, đừng
+kết luận từ current-state rồi suy ngược bằng đọc code — số hiện tại có thể đã bị
+sửa tay sau đó, và code không cho biết snapshot lúc chạy là gì.
+
+| Bảng | Là gì | Cột hay dùng |
+|---|---|---|
+| `orderhist` | snapshot đơn tại **mỗi lần thay đổi** — nguồn duy nhất cho "tiền đổi lúc nào, ai đổi" | `OrderRequestID`, `TypeCD`, `Status`, `Description`, `CreatorCD`, `CreatorUserID`, `CreatedAt`, `Meta` |
+| `auditlog` | audit log chung, do common-service ghi qua gRPC `SaveAuditLog` | `EntityType`, `EntityID`, `Action`, `ActorID`/`ActorType`/`ActorName`, `Platform`, `Reason`, `BeforeData`, `AfterData`, `OccurredAt` |
+
+**`orderhist.Meta`** là JSON; khoản tiền nằm ở key `AmountList` =
+`[{ID, OrderRequestID, Title, Amount}]`. Chỉ có `Title` (text tiếng Hàn, ví dụ
+`소득세(기사)`) — **không có `PriceCD`**, nên lọc một khoản phải match theo `Title`,
+không map được bằng mã như ở `orderamount`.
+
+**`auditlog` là controlled vocabulary, không phải log toàn hệ thống.** Chỉ 6
+`EntityType` được đăng ký trong catalog: `DriverBankAccount`, `DriverSSN`,
+`DriverBusinessInfo`, `OrganizationBusinessInfo`, `UserPoolPermission`,
+`OrganizationPoolAssignment` — **toàn bộ là identity/permission**. Không có
+`orderamount`, `order`, pricing. Nghĩa là **thay đổi tiền không hề có audit log**:
+một khoản bị sửa tay ở admin sẽ không xuất hiện ở đây, chỉ để lại vết ở
+`orderhist`. Đừng kết luận "không ai sửa" vì `auditlog` trống.
+
+Chi tiết khác: `BeforeData` NULL khi `Action=CREATE`, `AfterData` NULL khi DELETE
+(dùng để phân biệt tạo mới với sửa). `Platform` ∈ `DA|CA|WEB2|ADMIN|B2B|B2C|SYSTEM`,
+NULL cho row legacy. `ActorType` ∈ `DRIVER|ADMIN|B2C_USER|B2B_USER|SYSTEM`. Field
+nhạy cảm được AES-256-GCM (`IsEncrypted`/`EncKeyVersion`). Bảng bắt đầu có dữ liệu
+từ giữa 2026 — hỏi về mốc cũ hơn thì kiểm `MIN(OccurredAt)` trước khi kết luận
+"không có thay đổi".
+
+`actionlog` là bảng chị em cùng do common-service ghi, **chưa map** ở doc này.
+
 ## Staging ≠ prod
 
 `db_query` (staging) và `db_query_prod` là **hai schema khác nhau**, không phải hai
