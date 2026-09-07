@@ -19,7 +19,7 @@ lỗi `CONFIG` thay vì làm bot chết giữa chừng, nên bạn có thể b�
 | `sqlite3` CLI | `sqlite3 --version` | Chỉ cần cho `make db-show` / `db-stats`. |
 
 ```bash
-cd /Users/tyron/Projects/agentic
+cd /Users/tyron/Documents/work/Gogox/agentic
 make install     # tạo .venv + editable install + copy .env.example -> .env
 ```
 

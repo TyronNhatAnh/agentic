@@ -45,7 +45,7 @@ legacy `claude -p` subprocess path was removed 2026-05-30).
 ## Install
 
 ```bash
-cd /Users/tyron/Projects/agentic
+cd /Users/tyron/Documents/work/Gogox/agentic
 make install           # .venv + editable install + copy .env.example -> .env
 # then edit .env (see .env.example for the full list)
 ```

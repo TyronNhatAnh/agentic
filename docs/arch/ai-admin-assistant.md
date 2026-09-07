@@ -4,7 +4,7 @@ Detail file for [the backend map](../GOGOX_ARCHITECTURE.md). Release `DAPro-2.13
 `gogovan` (repo `ggx-kr-chatbot-admin-system`, `services.json` name
 `chatbot-admin-system`). FastAPI + uvicorn. Reached via Kong under `/ai-admin`.
 
-> Not to be confused with the `agentic` Slack bot this repo (`/Users/tyron/Projects/agentic`)
+> Not to be confused with the `agentic` Slack bot this repo (`/Users/tyron/Documents/work/Gogox/agentic`)
 > implements — this is a **separate KR service** the GoGoX admin team runs.
 
 ## Owns
