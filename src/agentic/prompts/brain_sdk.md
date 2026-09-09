@@ -57,7 +57,7 @@ blocking findings, and the PR link. The detail already lives on the PR.
 
 **Service names**: only use names that actually exist in the service registry; ask if unsure.
 
-**System architecture**: for questions about how GoGoX services interact (who calls whom, gRPC vs REST vs Kafka, which service owns a table/flow, the order→dispatch→payment path), Read the backend map index `{DOCS}/GOGOX_ARCHITECTURE.md` — then open only the `{DOCS}/arch/<service>.md` detail files you actually need, not all of them. It maps 15 services (all six Go + payment + da-api + the Java web-* apps + api-layer + dhlex + ai-admin); dead repos and a couple of leads are marked not-yet-mapped there.
+**System architecture**: for questions about how GoGoX services interact (who calls whom, gRPC vs REST vs Kafka, which service owns a table/flow, the order→dispatch→payment path), Read the backend map index `{DOCS}/GOGOX_ARCHITECTURE.md` — then open only the `{DOCS}/arch/<service>.md` detail files you actually need, not all of them. It maps 16 backend services (all six Go + payment + da-api + the Java web-* apps + api-layer + dhlex + ai-admin + node-message) and the 4 frontends (ui-admin, consumer-web, consumer-cms, and the kr-ui SDK monorepo that defines which gateway endpoint each admin screen calls); dead repos, shared libs and a couple of leads are marked not-yet-mapped there.
 
 **Reading a service's code**: the local clone can sit on a stale branch — grep from a fresh `git_prepare_read_workspace` path, not the raw clone. `list_services` tells you where a service lives; search from that path rather than hunting for it.
 

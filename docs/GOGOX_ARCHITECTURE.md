@@ -64,8 +64,19 @@ the Go APIs).
 | ai-admin-assistant | Python (FastAPI) | KR admin **chatbot** (Gemini) over the Go services | [arch/ai-admin-assistant.md](arch/ai-admin-assistant.md) |
 | node-message | Node.js | Legacy order push/SMS socket server ("MessageServer") — called only by web-api | [arch/node-message.md](arch/node-message.md) |
 
+### Frontends (browser clients — no DB of their own)
+
+| App | Stack | Role | Detail |
+|---|---|---|---|
+| ggx-kr-ui-admin | Next.js 14 (App Router) | New admin/system console SPA at `/admin` + `/system` | [arch/ui-admin.md](arch/ui-admin.md) |
+| ggx-kr-consumer-web | Next.js (Pages Router) | Customer web app `/cw` (B2C prod + B2B pilot) + the Mobis tracking host | [arch/consumer-web.md](arch/consumer-web.md) |
+| ggx-kr-consumer-cms | Next.js 14 (App Router) | Public marketing landing page at `/introduction` | [arch/consumer-cms.md](arch/consumer-cms.md) |
+| ggx-kr-ui | TS monorepo (Turborepo) | **Publishes no app** — the `@gogovan/kr-{model,backend,ui-kit}` SDK the admin uses | [arch/kr-ui.md](arch/kr-ui.md) |
+
 Not yet mapped (see §5): a separate GoGoX **pricing/fares** service; dead repos
-(web-b2c, web-driver, gogox-service); da-api-v2. web-library is the shared Java client lib.
+(web-b2c, web-driver, gogox-service, the frozen ui-b2b deployment); da-api-v2.
+web-library, service-utils and org.spring.utils are shared libraries, not services;
+k8s-deployments is the Argo/Helm config repo (useful for ingress and image tags).
 
 ---
 
@@ -168,9 +179,11 @@ the **legacy Java backend** sit at the edges over HTTP.
 
 ## 5. Not-yet-mapped (leads only — verify before relying)
 
-Sixteen services have detail files (6 Go + payment + da-api + web-api + web-admin +
-web-b2b + web-systemAdmin + api-layer + dhlex + ai-admin + node-message). Every live
-service in `services.json` is now mapped. Still outstanding:
+Twenty detail files: sixteen backend services (6 Go + payment + da-api + web-api +
+web-admin + web-b2b + web-systemAdmin + api-layer + dhlex + ai-admin + node-message)
+and four frontends (ui-admin, consumer-web, consumer-cms, and the kr-ui SDK monorepo).
+Every entry in `services.json` is now mapped except the shared libs and the config
+repo. Still outstanding:
 
 - **GoGoX pricing/fares service** — `web-api` calls `staging.api.gogox.co.kr/fares/orders/{id}`
   for fare computation. Not in `services.json`, no local clone; a real dependency worth
@@ -178,9 +191,16 @@ service in `services.json` is now mapped. Still outstanding:
 - **web-library** — shared Java client lib (branch `snapshot/2.0`) providing `Crypto`
   (the `9090van` apikey hash), `AuditLogGateway`, `Utility.download`. Not a runtime
   service; extract if you need the exact apikey algorithm.
+- **service-utils / org.spring.utils** — shared Go and Java helper libraries, no
+  runtime surface. `k8s-deployments` is the Argo/Helm repo: go there for the ingress
+  path→service map and the deployed image tag of anything, not for business logic.
 - **Dead repos (skip):** `web-b2c` (release stuck at DAPro-2.110), `web-driver`
   (DAPro-2.49), `gogox-service` (no release branch, last commit 2022). Confirmed
   abandoned — do not treat as current architecture.
+- **`ui-b2b` (frozen):** an Argo app still serving `web.business.gogovan.co.kr/b2b`,
+  but `gogovan/ggx-kr-ui-b2b` does not exist on GitHub and its image is pinned to a
+  2025-09-17 build. Removed from `services.json`; the detail is in
+  [arch/ui-admin.md](arch/ui-admin.md).
 - **da-api-v2** (`TyronNA/ggx-kr-da-api-v2`) — a da-api rewrite? no local clone.
 
 When you need one, extract it the same way (fresh release worktree → routes/clients/
